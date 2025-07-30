@@ -62,6 +62,7 @@ struct ContentView: View {
     @State private var showSidebar = false
     @State private var sidebarDragOffset: CGFloat = 0
     @State private var showAppInfo = false
+    @State private var showGatewayDebug = false
     @State private var showCommandSuggestions = false
     @State private var commandSuggestions: [String] = []
     @State private var backSwipeOffset: CGFloat = 0
@@ -182,6 +183,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAppInfo) {
             AppInfoView()
+        }
+        .sheet(isPresented: $showGatewayDebug) {
+            GatewayDebugView()
         }
         .sheet(isPresented: Binding(
             get: { viewModel.showingFingerprintFor != nil },
@@ -736,6 +740,43 @@ struct ContentView: View {
                         }
                         }
                     }
+                    
+                    // Debug section
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .font(.system(size: 10))
+                                .accessibilityHidden(true)
+                            Text("DEBUG")
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        }
+                        .foregroundColor(secondaryTextColor)
+                        .padding(.horizontal, 12)
+                        
+                        Button(action: {
+                            showGatewayDebug = true
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showSidebar = false
+                                sidebarDragOffset = 0
+                            }
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "wifi.circle")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(textColor)
+                                
+                                Text("Gateway Debug")
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .foregroundColor(textColor)
+                                
+                                Spacer()
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 8)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .padding(.vertical, 8)
             }
@@ -820,6 +861,11 @@ struct ContentView: View {
                 .onTapGesture(count: 3) {
                     // PANIC: Triple-tap to clear all data
                     viewModel.panicClearAllData()
+                }
+                .onTapGesture(count: 2) {
+                    // Double tap for gateway debug
+                    print("Double tap detected - showing gateway debug")
+                    showGatewayDebug = true
                 }
                 .onTapGesture(count: 1) {
                     // Single tap for app info

@@ -135,6 +135,7 @@ class ChatViewModel: ObservableObject {
     // MARK: - Services and Storage
     
     var meshService = BluetoothMeshService()
+    var gatewayTransport: GatewayTransport!
     private let userDefaults = UserDefaults.standard
     private let nicknameKey = "bitchat.nickname"
     
@@ -187,6 +188,29 @@ class ChatViewModel: ObservableObject {
         
         // Start mesh service immediately
         meshService.startServices()
+        
+        // Start gateway transport for extended range
+        Task { @MainActor in
+            gatewayTransport = GatewayTransport()
+            await gatewayTransport.start()
+            
+            // Listen for messages from the gateway and forward to mesh service
+            for await gatewayFrame in gatewayTransport.frames {
+                // Process gateway messages as if they came from mesh service
+                // This extends the mesh network through LoRa gateways
+                print("ChatViewModel: Received gateway message: \(gatewayFrame.count) bytes")
+                
+                // Forward gateway messages to the local mesh
+                // Note: In a full implementation, we'd need to:
+                // 1. Parse the gateway frame format
+                // 2. Extract the BitChat message
+                // 3. Forward it through meshService
+                // For now, we'll just log it
+                if let messageText = String(data: gatewayFrame, encoding: .utf8) {
+                    print("ChatViewModel: Gateway message content: \(messageText)")
+                }
+            }
+        }
         
         // Set up message retry service
         MessageRetryService.shared.meshService = meshService
@@ -531,6 +555,22 @@ class ChatViewModel: ObservableObject {
             
             // Send via mesh with mentions
             meshService.sendMessage(content, mentions: mentions)
+            
+            // Also send via gateway transport for extended range
+            Task { @MainActor in
+                guard let gatewayTransport = gatewayTransport else {
+                    print("ChatViewModel: Gateway transport not initialized yet")
+                    return
+                }
+                
+                do {
+                    let gatewayMessage = content.data(using: .utf8) ?? Data()
+                    try await gatewayTransport.sendOpaque(gatewayMessage)
+                    print("ChatViewModel: Message forwarded to gateway")
+                } catch {
+                    print("ChatViewModel: Failed to forward message to gateway: \(error)")
+                }
+            }
         }
     }
     
