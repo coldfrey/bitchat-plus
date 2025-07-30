@@ -20,22 +20,22 @@ final class GatewayPeripheral: NSObject, CBPeripheralDelegate {
         super.init()
     }
 
-    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard error == nil else {
             print("GatewayPeripheral: Service discovery failed: \(error!)")
             return
         }
         
-        for service in peripheral.services ?? [] where service.uuid == GatewayTransport.serviceUUID {
+        for service in peripheral.services ?? [] where service.uuid == GatewayUUIDs.serviceUUID {
             peripheral.discoverCharacteristics([
-                GatewayTransport.txUUID,
-                GatewayTransport.rxUUID,
-                GatewayTransport.cfgUUID
+                GatewayUUIDs.txUUID,
+                GatewayUUIDs.rxUUID,
+                GatewayUUIDs.cfgUUID
             ], for: service)
         }
     }
 
-    func peripheral(_ peripheral: CBPeripheral,
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
                    didDiscoverCharacteristicsFor service: CBService,
                    error: Error?) {
         guard error == nil else {
@@ -43,40 +43,39 @@ final class GatewayPeripheral: NSObject, CBPeripheralDelegate {
             return
         }
         
-        for characteristic in service.characteristics ?? [] {
-            switch characteristic.uuid {
-            case GatewayTransport.txUUID:
-                chTX = characteristic
-                print("GatewayPeripheral: Found TX characteristic")
-                
-            case GatewayTransport.rxUUID:
-                chRX = characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
-                print("GatewayPeripheral: Found RX characteristic, enabled notifications")
-                
-            case GatewayTransport.cfgUUID:
-                chCFG = characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
-                peripheral.readValue(for: characteristic)
-                print("GatewayPeripheral: Found CFG characteristic, enabled notifications and reading initial value")
-                
-            default:
-                break
+        Task { @MainActor in
+            for characteristic in service.characteristics ?? [] {
+                switch characteristic.uuid {
+                case GatewayUUIDs.txUUID:
+                    self.chTX = characteristic
+                    print("GatewayPeripheral: Found TX characteristic")
+                    peripheral.setNotifyValue(true, for: characteristic)
+                case GatewayUUIDs.rxUUID:
+                    self.chRX = characteristic
+                    print("GatewayPeripheral: Found RX characteristic (for sending to ESP32)")
+                case GatewayUUIDs.cfgUUID:
+                    self.chCFG = characteristic
+                    print("GatewayPeripheral: Found Config characteristic")
+                    peripheral.setNotifyValue(true, for: characteristic)
+                    peripheral.readValue(for: characteristic)
+                default:
+                    break
+                }
             }
-        }
-        
-        // Determine MTU
-        mtu = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        print("GatewayPeripheral: MTU = \(mtu)")
-        
-        // Mark as ready if we have essential characteristics
-        if chTX != nil && chRX != nil {
-            isReady = true
-            print("GatewayPeripheral: Gateway ready for communication")
+            
+            // Determine MTU
+            self.mtu = peripheral.maximumWriteValueLength(for: .withoutResponse)
+            print("GatewayPeripheral: MTU = \(self.mtu)")
+            
+            // Mark as ready if we have essential characteristics
+            if self.chTX != nil && self.chRX != nil {
+                self.isReady = true
+                print("GatewayPeripheral: Gateway ready for communication")
+            }
         }
     }
 
-    func peripheral(_ peripheral: CBPeripheral,
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
                    didUpdateValueFor characteristic: CBCharacteristic,
                    error: Error?) {
         guard error == nil else {
@@ -91,51 +90,76 @@ final class GatewayPeripheral: NSObject, CBPeripheralDelegate {
         
         // Handle different characteristic types
         switch characteristic.uuid {
-        case GatewayTransport.rxUUID:
-            handleRxData(value)
-        case GatewayTransport.cfgUUID:
+        case GatewayUUIDs.txUUID:
+            // TX is where ESP32 sends data TO the phone
+            // Check if this has a valid bridge header or is a direct message
+            if value.count >= 24 {
+                // Check magic number to determine format
+                let magic = value.withUnsafeBytes { bytes in
+                    bytes.loadUnaligned(fromByteOffset: 0, as: UInt16.self).littleEndian
+                }
+                if magic == 0xBC77 {
+                    // Valid bridge header - process normally
+                    handleRxData(value)
+                } else {
+                    // No valid bridge header - this is a direct message payload
+                    print("GatewayPeripheral: Received direct payload: \(value.count) bytes")
+                    Task { @MainActor in
+                        self.manager.onOpaqueFrame(value)
+                    }
+                }
+            } else {
+                // Too short for bridge header - must be direct message
+                print("GatewayPeripheral: Received short direct payload: \(value.count) bytes")
+                Task { @MainActor in
+                    self.manager.onOpaqueFrame(value)
+                }
+            }
+        case GatewayUUIDs.cfgUUID:
             handleConfigData(value)
         default:
             print("GatewayPeripheral: Unknown characteristic updated: \(characteristic.uuid)")
         }
     }
     
-    private func handleRxData(_ value: Data) {
+    nonisolated private func handleRxData(_ value: Data) {
         guard value.count >= 24 else {
-            print("GatewayPeripheral: RX data too short: \(value.count) bytes")
+            print("GatewayPeripheral: Bridge header data too short: \(value.count) bytes, expected >= 24")
             return
         }
         
         // Parse bridge header
         guard let header = BridgeHeader.fromData(value) else {
-            print("GatewayPeripheral: Invalid bridge header")
+            print("GatewayPeripheral: Failed to parse bridge header")
             return
         }
         
-        // Validate magic
+        // Validate magic - should already be validated by caller
         guard header.magic == 0xBC77 else {
-            print("GatewayPeripheral: Invalid magic: 0x\(String(header.magic, radix: 16))")
+            print("GatewayPeripheral: Unexpected invalid magic in handleRxData: 0x\(String(header.magic, radix: 16))")
             return
         }
         
         // Check for duplicates
-        if dedup.contains(header.msgId) {
-            print("GatewayPeripheral: Duplicate message: \(header.msgId)")
-            return
+        Task { @MainActor in
+            if self.dedup.contains(header.msgId) {
+                print("GatewayPeripheral: Duplicate message: \(header.msgId)")
+                return
+            }
+            
+            self.dedup.insert(header.msgId)
+            
+            // Extract payload
+            let payload = value.dropFirst(24)
+            
+            print("GatewayPeripheral: Received frame: msgId=\(header.msgId), ttl=\(header.ttl), hop=\(header.hop), len=\(payload.count)")
+            
+            // Forward to manager
+            self.manager.onOpaqueFrame(Data(payload))
         }
-        
-        dedup.insert(header.msgId)
-        
-        // Extract payload
-        let payload = value.dropFirst(24)
-        
-        print("GatewayPeripheral: Received frame: msgId=\(header.msgId), ttl=\(header.ttl), hop=\(header.hop), len=\(payload.count)")
-        
-        // Forward to manager
-        manager.onOpaqueFrame(Data(payload))
     }
     
-    private func handleConfigData(_ value: Data) {
+    nonisolated private func handleConfigData(_ value: Data) {
         if let configString = String(data: value, encoding: .utf8) {
             print("GatewayPeripheral: Config/Stats update: \(configString)")
         } else {
@@ -143,7 +167,7 @@ final class GatewayPeripheral: NSObject, CBPeripheralDelegate {
         }
     }
     
-    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             print("GatewayPeripheral: Write error: \(error)")
         }

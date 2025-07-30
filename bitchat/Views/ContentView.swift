@@ -21,6 +21,14 @@ struct PeerDisplayData: Identifiable {
     let encryptionStatus: EncryptionStatus
 }
 
+// Add this after PeerDisplayData to track connection types
+enum ConnectionType {
+    case direct
+    case gateway
+    case mixed
+    case none
+}
+
 // MARK: - Lazy Link Preview
 
 // Lazy loading wrapper for link previews
@@ -270,18 +278,52 @@ struct ContentView: View {
                             } else {
                                 // Regular messages with natural text wrapping
                                 VStack(alignment: .leading, spacing: 0) {
-                                    HStack(alignment: .top, spacing: 0) {
+                                    // Message Row
+                                    HStack(alignment: .top, spacing: 8) {
+                                        // Routing indicator
+                                        if message.sentViaGateway {
+                                            VStack(spacing: 2) {
+                                                Image(systemName: "antenna.radiowaves.left.and.right")
+                                                    .font(.system(size: 8))
+                                                    .foregroundColor(Color.blue.opacity(0.5))
+                                                Text("relay")
+                                                    .font(.system(size: 8, design: .monospaced))
+                                                    .foregroundColor(Color.blue.opacity(0.5))
+                                            }
+                                            .frame(width: 30)
+                                        } else if viewModel.connectedPeers.contains(message.senderPeerID ?? "") {
+                                            VStack(spacing: 2) {
+                                                Image(systemName: "wifi")
+                                                    .font(.system(size: 8))
+                                                    .foregroundColor(Color.green.opacity(0.5))
+                                                Text("direct")
+                                                    .font(.system(size: 8, design: .monospaced))
+                                                    .foregroundColor(Color.green.opacity(0.5))
+                                            }
+                                            .frame(width: 30)
+                                        }
+                                        
                                         // Single text view for natural wrapping
                                         Text(viewModel.formatMessageAsText(message, colorScheme: colorScheme))
                                             .textSelection(.enabled)
                                             .fixedSize(horizontal: false, vertical: true)
                                             .frame(maxWidth: .infinity, alignment: .leading)
+                                            .id(message.id)
                                         
                                         // Delivery status indicator for private messages
                                         if message.isPrivate && message.sender == viewModel.nickname,
                                            let status = message.deliveryStatus {
                                             DeliveryStatusView(status: status, colorScheme: colorScheme)
                                                 .padding(.leading, 4)
+                                        }
+                                        
+                                        // Gateway indicator for messages sent/received via gateway
+                                        if message.sentViaGateway {
+                                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(Color.blue.opacity(0.7))
+                                                .padding(.leading, 4)
+                                                .help(message.sender == viewModel.nickname ? "Sent via gateway" : "Received via gateway")
                                         }
                                     }
                                     
@@ -614,10 +656,107 @@ struct ContentView: View {
                         }
                         
                         if viewModel.connectedPeers.isEmpty {
-                            Text("nobody around...")
-                                .font(.system(size: 14, design: .monospaced))
-                                .foregroundColor(secondaryTextColor)
-                                .padding(.horizontal)
+                            // Show gateway status if connected but no direct peers
+                            if viewModel.isGatewayConnected {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    // Gateway connection header with more info
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "antenna.radiowaves.left.and.right")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(Color.green)
+                                        
+                                        Text("gateway: \(viewModel.gatewayName ?? "connected")")
+                                            .font(.system(size: 14, design: .monospaced))
+                                            .foregroundColor(Color.green)
+                                        
+                                        Spacer()
+                                        
+                                        // Show gateway stats if available
+                                        if let _ = viewModel.gatewayTransport {
+                                            Button(action: {
+                                                showGatewayDebug = true
+                                            }) {
+                                                Image(systemName: "info.circle")
+                                                    .font(.system(size: 12))
+                                                    .foregroundColor(Color.blue)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                    .padding(.horizontal)
+                                    
+                                    // Show all known gateways and their connected peers
+                                    if let gatewayStatuses = viewModel.gatewayTransport?.gatewayStatuses,
+                                       !gatewayStatuses.isEmpty {
+                                        Text("network status:")
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .foregroundColor(secondaryTextColor)
+                                            .padding(.horizontal)
+                                            .padding(.top, 4)
+                                        
+                                        // Group peers by gateway
+                                        let gatewayGroups = Dictionary(grouping: viewModel.gatewayPeers) { $0.gatewayName }
+                                        
+                                        ForEach(gatewayGroups.keys.sorted(), id: \.self) { gatewayName in
+                                            if let peers = gatewayGroups[gatewayName] {
+                                                VStack(alignment: .leading, spacing: 4) {
+                                                    // Gateway header
+                                                    HStack {
+                                                        Image(systemName: "dot.radiowaves.left.and.right")
+                                                            .font(.system(size: 10))
+                                                            .foregroundColor(Color.blue.opacity(0.7))
+                                                        
+                                                        Text(gatewayName)
+                                                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                                            .foregroundColor(Color.blue)
+                                                        
+                                                        Text("(\(peers.count))")
+                                                            .font(.system(size: 11, design: .monospaced))
+                                                            .foregroundColor(secondaryTextColor)
+                                                    }
+                                                    .padding(.horizontal)
+                                                    .padding(.vertical, 2)
+                                                    
+                                                    // Connected peers
+                                                    ForEach(peers) { peer in
+                                                        HStack(spacing: 8) {
+                                                            Text("  •")
+                                                                .font(.system(size: 12, design: .monospaced))
+                                                                .foregroundColor(secondaryTextColor)
+                                                            
+                                                            Text(peer.nickname)
+                                                                .font(.system(size: 14, design: .monospaced))
+                                                                .foregroundColor(textColor)
+                                                            
+                                                            Spacer()
+                                                            
+                                                            // Show how fresh the data is
+                                                            let age = Date().timeIntervalSince(peer.timestamp)
+                                                            Circle()
+                                                                .fill(age < 10 ? Color.green : age < 20 ? Color.yellow : Color.red.opacity(0.5))
+                                                                .frame(width: 6, height: 6)
+                                                        }
+                                                        .padding(.horizontal)
+                                                    }
+                                                }
+                                                .padding(.vertical, 2)
+                                            }
+                                        }
+                                    } else if viewModel.gatewayPeers.isEmpty {
+                                        Text("waiting for network info...")
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .foregroundColor(secondaryTextColor.opacity(0.7))
+                                            .italic()
+                                            .padding(.horizontal)
+                                            .padding(.top, 4)
+                                    }
+                                }
+                            } else {
+                                Text("nobody around...")
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .foregroundColor(secondaryTextColor)
+                                    .padding(.horizontal)
+                            }
                         } else {
                             // Extract peer data for display
                             let peerNicknames = viewModel.meshService.getPeerNicknames()
@@ -735,6 +874,64 @@ struct ContentView: View {
                                 if !peer.isMe {
                                     // Show fingerprint on double tap
                                     viewModel.showFingerprint(for: peer.id)
+                                }
+                            }
+                        }
+                        
+                        // Add gateway indicator if also connected to gateway
+                        if viewModel.isGatewayConnected {
+                            HStack(spacing: 4) {
+                                Image(systemName: "antenna.radiowaves.left.and.right")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(Color.green.opacity(0.7))
+                                Text("+ gateway relay active")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(Color.green.opacity(0.7))
+                            }
+                            .padding(.horizontal)
+                            .padding(.top, 4)
+                            
+                            // Show gateway peers if any
+                            if !viewModel.gatewayPeers.isEmpty {
+                                Text("remote peers via gateways:")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(secondaryTextColor.opacity(0.7))
+                                    .padding(.horizontal)
+                                    .padding(.top, 2)
+                                
+                                // Group peers by gateway
+                                let gatewayGroups = Dictionary(grouping: viewModel.gatewayPeers) { $0.gatewayName }
+                                
+                                ForEach(gatewayGroups.keys.sorted(), id: \.self) { gatewayName in
+                                    if let peers = gatewayGroups[gatewayName] {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("  \(gatewayName):")
+                                                .font(.system(size: 10, design: .monospaced))
+                                                .foregroundColor(Color.blue.opacity(0.7))
+                                                .padding(.horizontal)
+                                            
+                                            ForEach(peers) { peer in
+                                                HStack(spacing: 4) {
+                                                    Text("    •")
+                                                        .font(.system(size: 10, design: .monospaced))
+                                                        .foregroundColor(secondaryTextColor.opacity(0.5))
+                                                    
+                                                    Text(peer.nickname)
+                                                        .font(.system(size: 12, design: .monospaced))
+                                                        .foregroundColor(textColor.opacity(0.8))
+                                                    
+                                                    Spacer()
+                                                    
+                                                    // Freshness indicator
+                                                    let age = Date().timeIntervalSince(peer.timestamp)
+                                                    Circle()
+                                                        .fill(age < 10 ? Color.green : age < 20 ? Color.yellow : Color.red.opacity(0.5))
+                                                        .frame(width: 4, height: 4)
+                                                }
+                                                .padding(.horizontal)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
