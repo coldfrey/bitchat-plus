@@ -63,6 +63,11 @@ uint32_t loraRxCount = 0;
 uint32_t loraTxCount = 0;
 volatile bool loraRxFlag = false;
 
+// Status broadcasting
+unsigned long lastStatusBroadcast = 0;
+const unsigned long STATUS_BROADCAST_INTERVAL = 10000; // 10 seconds
+std::vector<String> connectedDeviceNicknames;
+
 // Forward declarations
 void sendLoRaMessage(const uint8_t* data, size_t len);
 void cleanupMessageCache();
@@ -71,6 +76,8 @@ void updateStats();
 void onLoRaReceive();
 void processLoRaReceive();
 void processSerialCommand();
+void broadcastGatewayStatus();
+String getMessageTypeDescription(const uint8_t* payload, size_t len);
 
 // BLE Server Callbacks
 class MyServerCallbacks: public NimBLEServerCallbacks {
@@ -85,6 +92,13 @@ class MyServerCallbacks: public NimBLEServerCallbacks {
         deviceConnected = false;
         Serial.printf("[%s] *** BLE Client Disconnected ***\n", gatewayName.c_str());
         Serial.printf("Connected clients: %d\n", pServer->getConnectedCount());
+        
+        // Clear connected device nicknames when all clients disconnect
+        if (pServer->getConnectedCount() == 0) {
+            connectedDeviceNicknames.clear();
+            Serial.printf("[%s] Cleared connected device list\n", gatewayName.c_str());
+        }
+        
         pServer->startAdvertising();
         Serial.println("BLE advertising restarted");
     }
@@ -97,15 +111,43 @@ class MyRxCallbacks: public NimBLECharacteristicCallbacks {
         
         if (rxValue.length() > 0) {
             bleRxCount++;
-            Serial.printf("[%s] *** BLE RX #%lu: %d bytes ***\n", 
+            Serial.printf("\n[%s] ━━━ BLE RX #%lu: %d bytes ━━━\n", 
                          gatewayName.c_str(), bleRxCount, rxValue.length());
             
-            // Print hex dump of received data
-            Serial.print("Data: ");
-            for(int i = 0; i < rxValue.length(); i++) {
-                Serial.printf("%02X ", (uint8_t)rxValue[i]);
+            // Get message type description
+            String msgType = getMessageTypeDescription((const uint8_t*)rxValue.data(), rxValue.length());
+            Serial.printf("Message Type: %s\n", msgType.c_str());
+            
+            // Try to extract nickname from BitChat message
+            // BitChat messages have a specific binary format we need to parse
+            // For now, we'll look for system messages that announce connections
+            String messageStr((const char*)rxValue.data(), rxValue.length());
+            
+            // Look for patterns like "nickname connected" or messages from specific senders
+            // This is a simplified approach - in production you'd parse the actual BitChat protocol
+            if (messageStr.indexOf(" connected") > 0 && messageStr.indexOf("system") < 0) {
+                int spacePos = messageStr.indexOf(" connected");
+                if (spacePos > 0) {
+                    String nickname = messageStr.substring(0, spacePos);
+                    // Clean up the nickname
+                    nickname.trim();
+                    if (nickname.length() > 0 && nickname != "system") {
+                        // Check if we already have this nickname
+                        bool found = false;
+                        for (const auto& n : connectedDeviceNicknames) {
+                            if (n == nickname) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            connectedDeviceNicknames.push_back(nickname);
+                            Serial.printf("[%s] Added connected device: %s\n", 
+                                        gatewayName.c_str(), nickname.c_str());
+                        }
+                    }
+                }
             }
-            Serial.println();
             
             // Forward to LoRa
             sendLoRaMessage((const uint8_t*)rxValue.data(), rxValue.length());
@@ -120,6 +162,36 @@ class MyRxCallbacks: public NimBLECharacteristicCallbacks {
         }
     }
 };
+
+// Helper function to describe message type
+String getMessageTypeDescription(const uint8_t* payload, size_t len) {
+    if (len == 0) return "Empty";
+    
+    // Check for STATUS messages
+    if (len >= 6) {
+        String payloadStr = String((char*)payload).substring(0, 6);
+        if (payloadStr == "STATUS") {
+            return "Gateway Status Broadcast";
+        }
+    }
+    
+    // Check for text patterns
+    String preview((char*)payload, min(len, (size_t)50));
+    if (preview.indexOf("Echo:") == 0) {
+        return "Echo Response";
+    } else if (preview.indexOf("Heartbeat:") == 0) {
+        return "Heartbeat";
+    } else if (preview.indexOf("Test message") >= 0) {
+        return "Test Message";
+    } else if (preview.indexOf(" connected") > 0) {
+        return "Connection Announcement";
+    } else if (preview.indexOf(" disconnected") > 0) {
+        return "Disconnection Announcement";
+    }
+    
+    // Default to showing first few readable characters
+    return "BitChat Message";
+}
 
 // Send message over LoRa
 void sendLoRaMessage(const uint8_t* data, size_t len) {
@@ -158,23 +230,39 @@ void sendLoRaMessage(const uint8_t* data, size_t len) {
     // Transmit over LoRa
     size_t totalLen = sizeof(BridgeHdr) + frame.len;
     
-    Serial.println("┌─── BLE → LoRa ───────────────────────┐");
-    Serial.printf("│ Received %d bytes from iOS app       │\n", len);
-    Serial.printf("│ Message ID: 0x%016llX       │\n", frame.hdr.msg_id);
-    Serial.printf("│ Our Gateway: 0x%08X             │\n", gatewayId);
-    Serial.printf("│ TTL: %d, Hop: %d                    │\n", frame.hdr.ttl, frame.hdr.hop);
-    Serial.println("└──────────────────────────────────────┘");
+    Serial.println("┌─── BLE → LoRa TRANSMISSION ──────────────────────────┐");
+    Serial.printf("│ Source: BLE Client via %s                           │\n", gatewayName.c_str());
+    Serial.printf("│ Destination: LoRa Mesh Network                       │\n");
+    Serial.printf("│ Message ID: 0x%016llX                       │\n", frame.hdr.msg_id);
+    Serial.printf("│ Gateway ID: 0x%08X                                 │\n", gatewayId);
+    Serial.printf("│ TTL: %d, Hop: %d                                    │\n", frame.hdr.ttl, frame.hdr.hop);
+    Serial.printf("│ Payload Size: %d bytes                              │\n", len);
+    Serial.printf("│ Message Type: %s                                     │\n", getMessageTypeDescription(data, len).c_str());
     
-    Serial.printf("[%s] LoRa TX: %d bytes, TTL=%d, msg_id=%llx\n", 
-                 gatewayName.c_str(), totalLen, frame.hdr.ttl, frame.hdr.msg_id);
+    // Show payload preview
+    Serial.print("│ Data Preview: ");
+    for (int i = 0; i < min(len, (size_t)16); i++) {
+        if (data[i] >= 32 && data[i] <= 126) {
+            Serial.printf("%c", data[i]);
+        } else {
+            Serial.printf(".");
+        }
+    }
+    if (len > 16) Serial.print("...");
+    for (int i = 0; i < (50 - min(len, (size_t)16)); i++) Serial.print(" ");
+    Serial.println("│");
+    
+    Serial.println("└──────────────────────────────────────────────────────┘");
+    
+    Serial.printf("[%s] Transmitting %d bytes over LoRa...\n", gatewayName.c_str(), totalLen);
     
     int state = radio.transmit((uint8_t*)&frame, totalLen);
     
     if (state == RADIOLIB_ERR_NONE) {
         loraTxCount++;
-        Serial.printf("[%s] LoRa TX success!\n", gatewayName.c_str());
+        Serial.printf("[%s] ✓ LoRa TX success!\n", gatewayName.c_str());
     } else {
-        Serial.printf("[%s] LoRa TX failed: %d\n", gatewayName.c_str(), state);
+        Serial.printf("[%s] ✗ LoRa TX failed: %d\n", gatewayName.c_str(), state);
     }
     
     // Return to receive mode
@@ -203,15 +291,21 @@ void processLoRaReceive() {
         loraRxCount++;
         Frame* frame = (Frame*)buffer;
         
-        Serial.println("\n┌─── LoRa Message Received ────────────┐");
-        Serial.printf("│ From Gateway: 0x%08X            │\n", frame->hdr.gw_id);
-        Serial.printf("│ Message ID: 0x%016llX       │\n", frame->hdr.msg_id);
-        Serial.printf("│ TTL: %d, Hop: %d                    │\n", frame->hdr.ttl, frame->hdr.hop);
-        Serial.printf("│ Payload: %d bytes                   │\n", frame->hdr.payload_len);
+        // Get RSSI and SNR
+        float rssi = radio.getRSSI();
+        float snr = radio.getSNR();
+        
+        Serial.println("\n┌─── LoRa MESSAGE RECEIVED ────────────────────────────┐");
+        Serial.printf("│ From Gateway: %s (0x%08X)                          │\n", 
+                     (frame->hdr.gw_id == gatewayId) ? gatewayName.c_str() : "Remote", frame->hdr.gw_id);
+        Serial.printf("│ Message ID: 0x%016llX                       │\n", frame->hdr.msg_id);
+        Serial.printf("│ TTL: %d, Hop: %d                                    │\n", frame->hdr.ttl, frame->hdr.hop);
+        Serial.printf("│ Payload: %d bytes                                   │\n", frame->hdr.payload_len);
+        Serial.printf("│ RSSI: %.1f dBm, SNR: %.1f dB                       │\n", rssi, snr);
         
         if (frame->hdr.magic != BRIDGE_MAGIC) {
-            Serial.println("│ Status: Invalid magic number        │");
-            Serial.println("└──────────────────────────────────────┘");
+            Serial.println("│ Status: ✗ Invalid magic number                      │");
+            Serial.println("└──────────────────────────────────────────────────────┘");
             radio.startReceive();
             return;
         }
@@ -222,12 +316,35 @@ void processLoRaReceive() {
         // Check if we've seen this message before (for re-broadcast decision)
         bool isNewMessage = !isDuplicate(frame->hdr.msg_id);
         
+        // Get message type
+        uint8_t* payload = buffer + sizeof(BridgeHdr);
+        String msgType = getMessageTypeDescription(payload, frame->hdr.payload_len);
+        Serial.printf("│ Message Type: %s                                     │\n", msgType.c_str());
+        
+        // Check if this is a status message
+        bool isStatusMessage = (msgType == "Gateway Status Broadcast");
+        
+        // Show payload preview
+        if (frame->hdr.payload_len > 0) {
+            Serial.print("│ Data Preview: ");
+            for (int i = 0; i < min(frame->hdr.payload_len, (uint16_t)16); i++) {
+                if (payload[i] >= 32 && payload[i] <= 126) {
+                    Serial.printf("%c", payload[i]);
+                } else {
+                    Serial.printf(".");
+                }
+            }
+            if (frame->hdr.payload_len > 16) Serial.print("...");
+            for (int i = 0; i < (50 - min(frame->hdr.payload_len, (uint16_t)16)); i++) Serial.print(" ");
+            Serial.println("│");
+        }
+        
         // IMPORTANT: Forward to BLE ONLY if:
         // 1. We have a connected client
-        // 2. This is NOT a message we originated (no echo back to app)
-        if (deviceConnected && pTxCharacteristic && frame->hdr.payload_len > 0 && !isOurMessage) {
+        // 2. This is NOT a message we originated
+        if (deviceConnected && pTxCharacteristic && frame->hdr.payload_len > 0 && 
+            !isOurMessage) {
             // Extract the BitChat payload
-            uint8_t* payload = buffer + sizeof(BridgeHdr);
             size_t payloadLen = frame->hdr.payload_len;
             
             // Forward to BLE
@@ -235,50 +352,54 @@ void processLoRaReceive() {
             pTxCharacteristic->notify();
             bleTxCount++;
             
-            Serial.println("│ Action: FORWARDED TO BLE CLIENT ✓   │");
-            Serial.printf("│ BLE TX: %d bytes sent              │\n", payloadLen);
+            Serial.println("│ Action: ✓ FORWARDED TO BLE CLIENT                   │");
+            Serial.printf("│ BLE TX: %d bytes sent to connected device          │\n", payloadLen);
             
-            // Show first few bytes of payload
-            Serial.print("│ Data: ");
-            for (int i = 0; i < min(payloadLen, (size_t)8); i++) {
-                Serial.printf("%02X ", payload[i]);
+            // If it's a status message, also log the status info
+            if (isStatusMessage) {
+                String statusStr((char*)payload, frame->hdr.payload_len);
+                Serial.printf("│ Status Info: %s │\n", statusStr.c_str());
             }
-            if (payloadLen > 8) Serial.print("...");
-            Serial.println("        │");
-        } else if (isOurMessage) {
-            Serial.println("│ Status: Our own message (no BLE TX) │");
-        } else if (!deviceConnected) {
-            Serial.println("│ Status: No BLE client connected     │");
+        } else {
+            // Explain why we're not forwarding
+            if (isOurMessage) {
+                Serial.println("│ Action: ✗ NOT FORWARDED (our own message)          │");
+            } else if (!deviceConnected) {
+                Serial.println("│ Action: ✗ NOT FORWARDED (no BLE client connected)  │");
+            }
         }
         
         // Re-broadcast decision (mesh networking)
         if (isNewMessage && frame->hdr.ttl > 1 && !isOurMessage) {
-            Serial.println("│ Action: Re-broadcasting (mesh)      │");
+            Serial.println("│ Mesh Action: PREPARING TO RE-BROADCAST              │");
             
             frame->hdr.ttl--;
             frame->hdr.hop++;
             
             // Add random delay to avoid collisions
             int delayMs = random(50, 200);
-            Serial.printf("│ Delay: %d ms (collision avoid)     │\n", delayMs);
+            Serial.printf("│ Collision Avoidance Delay: %d ms                   │\n", delayMs);
             delay(delayMs);
             
             int state = radio.transmit(buffer, len);
             if (state == RADIOLIB_ERR_NONE) {
                 loraTxCount++;
-                Serial.println("│ Re-broadcast: SUCCESS ✓             │");
+                Serial.println("│ Re-broadcast: ✓ SUCCESS                             │");
             } else {
-                Serial.printf("│ Re-broadcast: FAILED (err %d)      │\n", state);
+                Serial.printf("│ Re-broadcast: ✗ FAILED (error %d)                  │\n", state);
             }
-        } else if (!isNewMessage) {
-            Serial.println("│ Status: Duplicate (no rebroadcast)  │");
-        } else if (frame->hdr.ttl <= 1) {
-            Serial.println("│ Status: TTL expired (no rebroadcast)│");
-        } else if (isOurMessage) {
-            Serial.println("│ Status: Our message (no rebroadcast)│");
+        } else {
+            // Explain why we're not re-broadcasting
+            if (!isNewMessage) {
+                Serial.println("│ Mesh Action: ✗ NO RE-BROADCAST (duplicate msg)     │");
+            } else if (frame->hdr.ttl <= 1) {
+                Serial.println("│ Mesh Action: ✗ NO RE-BROADCAST (TTL expired)       │");
+            } else if (isOurMessage) {
+                Serial.println("│ Mesh Action: ✗ NO RE-BROADCAST (our message)       │");
+            }
         }
         
-        Serial.println("└──────────────────────────────────────┘");
+        Serial.println("└──────────────────────────────────────────────────────┘");
         updateStats();
     }
     
@@ -370,12 +491,52 @@ void processSerialCommand() {
             // Send a test message
             uint8_t testData[] = "Test message from serial";
             sendLoRaMessage(testData, sizeof(testData)-1);
+        } else if (cmd == "broadcast") {
+            // Manually trigger status broadcast
+            broadcastGatewayStatus();
         } else if (cmd == "help") {
             Serial.println("\nAvailable commands:");
-            Serial.println("  status - Show current status");
-            Serial.println("  test   - Send test LoRa message");
-            Serial.println("  help   - Show this help");
+            Serial.println("  status    - Show current status");
+            Serial.println("  test      - Send test LoRa message");
+            Serial.println("  broadcast - Send gateway status broadcast");
+            Serial.println("  help      - Show this help");
         }
+    }
+}
+
+void broadcastGatewayStatus() {
+    // Create a status message with connected device info
+    // Format: "STATUS|gateway_id|gateway_name|connected_count|nickname1,nickname2,..."
+    
+    String statusMsg = "STATUS|";
+    statusMsg += String(gatewayId, HEX);
+    statusMsg += "|";
+    statusMsg += gatewayName;
+    statusMsg += "|";
+    statusMsg += String(pServer ? pServer->getConnectedCount() : 0);
+    
+    // Add connected device nicknames if any
+    if (!connectedDeviceNicknames.empty()) {
+        statusMsg += "|";
+        for (size_t i = 0; i < connectedDeviceNicknames.size(); i++) {
+            if (i > 0) statusMsg += ",";
+            statusMsg += connectedDeviceNicknames[i];
+        }
+    }
+    
+    Serial.println("\n┌─── GATEWAY STATUS BROADCAST ─────────────────────────┐");
+    Serial.printf("│ Broadcasting gateway status to mesh network          │\n");
+    Serial.printf("│ Status: %s │\n", statusMsg.c_str());
+    Serial.println("└──────────────────────────────────────────────────────┘");
+    
+    // Send the status message directly (it will be wrapped by sendLoRaMessage)
+    sendLoRaMessage((uint8_t*)statusMsg.c_str(), statusMsg.length());
+    
+    // Also send to connected BLE clients directly
+    if (deviceConnected && pTxCharacteristic) {
+        pTxCharacteristic->setValue((uint8_t*)statusMsg.c_str(), statusMsg.length());
+        pTxCharacteristic->notify();
+        Serial.println("│ Also sent status to connected BLE client            │");
     }
 }
 
@@ -523,6 +684,12 @@ void loop() {
         pTxCharacteristic->setValue(heartbeat.c_str());
         pTxCharacteristic->notify();
         Serial.printf("Sent heartbeat: '%s'\n", heartbeat.c_str());
+    }
+
+    // Periodically broadcast gateway status
+    if (deviceConnected && pServer && millis() - lastStatusBroadcast > STATUS_BROADCAST_INTERVAL) {
+        lastStatusBroadcast = millis();
+        broadcastGatewayStatus();
     }
     
     delay(10);
