@@ -1,0 +1,21 @@
+[project]
+name = "bitchat-repeter"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Joshua Carey",email = "josh5485@me.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "asyncio (>=3.4.3,<4.0.0)",
+    "bleak (>=1.0.1,<2.0.0)",
+    "esptool (>=5.0.1,<6.0.0)",
+    "pyserial (>=3.5,<4.0)",
+    "cryptography (>=45.0.5,<46.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
