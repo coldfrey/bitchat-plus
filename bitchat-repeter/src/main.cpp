@@ -1,12 +1,15 @@
-// ESP32-S3 LoRa Gateway Repeater for BitChat
-// Acts as a BLE↔LoRa bridge to extend BitChat range through a mesh network
-// Forwards BitChat frames between BLE and LoRa with TTL and deduplication
+// ESP32-S3 LoRa Gateway Repeater for BitChat - Improved Message Handling
+// Implements message queuing, non-blocking operations, and better collision avoidance
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <RadioLib.h>
 #include <map>
-#include <set>  // Add this include
+#include <set>
+#include <queue>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #include "../include/hw_pins.h"
 #include "../include/bridge.h"
 
@@ -68,7 +71,7 @@ unsigned long lastStatusBroadcast = 0;
 const unsigned long STATUS_BROADCAST_INTERVAL = 10000; // 10 seconds
 std::vector<String> connectedDeviceNicknames;
 
-// Forward declarations
+// Forward declarations (only those that don't depend on QueuedMessage)
 void sendLoRaMessage(const uint8_t* data, size_t len);
 void cleanupMessageCache();
 bool isDuplicate(uint64_t msgId);
@@ -78,6 +81,48 @@ void processLoRaReceive();
 void processSerialCommand();
 void broadcastGatewayStatus();
 String getMessageTypeDescription(const uint8_t* payload, size_t len);
+bool isDuplicateLocked(uint64_t msgId);
+
+// Message queue structures
+struct QueuedMessage {
+    uint8_t data[256];
+    size_t len;
+    uint32_t receiveTime;
+    float rssi;
+    float snr;
+    bool isForRebroadcast;
+    uint32_t scheduledTransmitTime;  // For collision avoidance
+};
+
+// Forward declarations that depend on QueuedMessage (must come after struct definition)
+void processLoRaMessage(QueuedMessage* msg);
+void processBleMessage(QueuedMessage* msg);
+
+// Thread-safe message queues
+QueueHandle_t loraRxQueue;
+QueueHandle_t loraTxQueue;
+QueueHandle_t bleRxQueue;
+QueueHandle_t bleTxQueue;
+
+// Semaphores for thread safety
+SemaphoreHandle_t radioMutex;
+SemaphoreHandle_t bleMutex;
+SemaphoreHandle_t cacheMutex;
+
+// Task handles
+TaskHandle_t loraRxTaskHandle;
+TaskHandle_t loraTxTaskHandle;
+TaskHandle_t bleTaskHandle;
+
+// Performance metrics
+volatile uint32_t droppedMessages = 0;
+volatile uint32_t queueOverflows = 0;
+volatile uint32_t collisionBackoffs = 0;
+
+// Improved collision avoidance
+const uint32_t BASE_BACKOFF_MS = 10;
+const uint32_t MAX_BACKOFF_MS = 500;
+uint32_t currentBackoff = BASE_BACKOFF_MS;
 
 // BLE Server Callbacks
 class MyServerCallbacks: public NimBLEServerCallbacks {
@@ -158,6 +203,25 @@ class MyRxCallbacks: public NimBLECharacteristicCallbacks {
                 pTxCharacteristic->setValue(response.c_str());
                 pTxCharacteristic->notify();
                 Serial.printf("Sent echo response: '%s'\n", response.c_str());
+            }
+        }
+    }
+};
+
+// Improved RX callback for BLE
+class ImprovedRxCallbacks: public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic) {
+        std::string rxValue = pCharacteristic->getValue();
+        
+        if (rxValue.length() > 0) {
+            QueuedMessage msg;
+            memcpy(msg.data, rxValue.data(), rxValue.length());
+            msg.len = rxValue.length();
+            msg.receiveTime = millis();
+            
+            if (xQueueSend(bleRxQueue, &msg, 0) != pdTRUE) {
+                droppedMessages++;
+                Serial.println("[WARNING] BLE RX queue full!");
             }
         }
     }
@@ -281,183 +345,208 @@ void sendLoRaMessage(const uint8_t* data, size_t len) {
     updateStats();
 }
 
-// LoRa interrupt handler
-void onLoRaReceive() {
-    loraRxFlag = true;
+// Improved LoRa interrupt handler - just adds to queue
+void IRAM_ATTR onLoRaReceive() {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    
+    // Notify the LoRa RX task
+    vTaskNotifyGiveFromISR(loraRxTaskHandle, &xHigherPriorityTaskWoken);
+    
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
 }
 
-// Process received LoRa messages
-void processLoRaReceive() {
-    if (!loraRxFlag) return;
-    loraRxFlag = false;
-    
+// LoRa RX Task - runs on Core 0
+void loraRxTask(void* parameter) {
     uint8_t buffer[256];
-    size_t len = radio.getPacketLength();
     
-    if (len == 0) return;
-    
-    int state = radio.readData(buffer, len);
-    
-    if (state == RADIOLIB_ERR_NONE && len >= sizeof(BridgeHdr)) {
-        loraRxCount++;
-        Frame* frame = (Frame*)buffer;
+    while (true) {
+        // Wait for interrupt notification
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         
-        // Get RSSI and SNR
-        float rssi = radio.getRSSI();
-        float snr = radio.getSNR();
-        
-        Serial.println("\n┌─── LoRa MESSAGE RECEIVED ────────────────────────────┐");
-        Serial.printf("│ From Gateway: %s (0x%08X)                          │\n", 
-                     (frame->hdr.gw_id == gatewayId) ? gatewayName.c_str() : "Remote", frame->hdr.gw_id);
-        Serial.printf("│ Message ID: 0x%016llX                       │\n", frame->hdr.msg_id);
-        Serial.printf("│ TTL: %d, Hop: %d                                    │\n", frame->hdr.ttl, frame->hdr.hop);
-        Serial.printf("│ Payload: %d bytes                                   │\n", frame->hdr.payload_len);
-        Serial.printf("│ RSSI: %.1f dBm, SNR: %.1f dB                       │\n", rssi, snr);
-        
-        if (frame->hdr.magic != BRIDGE_MAGIC) {
-            Serial.println("│ Status: ✗ Invalid magic number                      │");
-            Serial.println("└──────────────────────────────────────────────────────┘");
-            radio.startReceive();
-            return;
-        }
-        
-        // Check if this is our own message echoing back
-        bool isOurMessage = (ourMessages.find(frame->hdr.msg_id) != ourMessages.end());
-        
-        // Check if we've seen this message before (for re-broadcast decision)
-        bool isNewMessage = !isDuplicate(frame->hdr.msg_id);
-        
-        // Get message type
-        uint8_t* payload = buffer + sizeof(BridgeHdr) + sizeof(uint16_t);  // Skip the len field
-        String msgType = getMessageTypeDescription(payload, frame->hdr.payload_len);
-        Serial.printf("│ Message Type: %s                                     │\n", msgType.c_str());
-        
-        // DEBUG: Log payload details
-        Serial.printf("│ DEBUG: payload_len from header: %d                  │\n", frame->hdr.payload_len);
-        Serial.printf("│ DEBUG: First 30 chars of payload: '");
-        for (int i = 0; i < min(30, (int)frame->hdr.payload_len); i++) {
-            if (payload[i] >= 32 && payload[i] <= 126) {
-                Serial.printf("%c", payload[i]);
-            } else {
-                Serial.printf("\\x%02X", payload[i]);
-            }
-        }
-        Serial.printf("'│\n");
-        
-        // Check if this is a status message
-        bool isStatusMessage = (msgType == "Gateway Status Broadcast");
-        
-        // Show payload preview
-        if (frame->hdr.payload_len > 0) {
-            Serial.print("│ Data Preview: ");
-            for (int i = 0; i < min(frame->hdr.payload_len, (uint16_t)16); i++) {
-                if (payload[i] >= 32 && payload[i] <= 126) {
-                    Serial.printf("%c", payload[i]);
-                } else {
-                    Serial.printf(".");
-                }
-            }
-            if (frame->hdr.payload_len > 16) Serial.print("...");
-            for (int i = 0; i < (50 - min(frame->hdr.payload_len, (uint16_t)16)); i++) Serial.print(" ");
-            Serial.println("│");
-        }
-        
-        // IMPORTANT: Forward to BLE ONLY if:
-        // 1. We have a connected client
-        // 2. This is NOT a message we originated
-        if (deviceConnected && pTxCharacteristic && frame->hdr.payload_len > 0 && 
-            !isOurMessage) {
-            // Extract the BitChat payload
-            size_t payloadLen = frame->hdr.payload_len;
+        if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            size_t len = radio.getPacketLength();
             
-            // DEBUG: About to forward to BLE
-            Serial.printf("│ DEBUG: About to send %d bytes to BLE               │\n", payloadLen);
-            Serial.printf("│ DEBUG: BLE payload content: '");
-            for (size_t i = 0; i < min(payloadLen, (size_t)30); i++) {
-                if (payload[i] >= 32 && payload[i] <= 126) {
-                    Serial.printf("%c", payload[i]);
-                } else {
-                    Serial.printf("\\x%02X", payload[i]);
-                }
-            }
-            Serial.printf("'│\n");
-            
-            // Check if this is a STATUS message that might have control characters
-            uint8_t* actualPayload = payload;
-            size_t actualPayloadLen = payloadLen;
-            
-            // Skip any leading control characters for STATUS messages
-            if (payloadLen >= 8) {
-                // Look for STATUS pattern, possibly with leading control chars
-                for (size_t i = 0; i <= min((size_t)2, payloadLen - 6); i++) {
-                    if (memcmp(payload + i, "STATUS", 6) == 0) {
-                        // Found STATUS at position i, skip control chars
-                        actualPayload = payload + i;
-                        actualPayloadLen = payloadLen - i;
-                        Serial.printf("│ DEBUG: Found STATUS at offset %d, adjusted len: %d │\n", i, actualPayloadLen);
-                        break;
+            if (len > 0 && len <= sizeof(buffer)) {
+                int state = radio.readData(buffer, len);
+                
+                if (state == RADIOLIB_ERR_NONE) {
+                    QueuedMessage msg;
+                    memcpy(msg.data, buffer, len);
+                    msg.len = len;
+                    msg.receiveTime = millis();
+                    msg.rssi = radio.getRSSI();
+                    msg.snr = radio.getSNR();
+                    msg.isForRebroadcast = false;
+                    
+                    // Try to queue the message
+                    if (xQueueSend(loraRxQueue, &msg, 0) != pdTRUE) {
+                        queueOverflows++;
+                        Serial.println("[WARNING] LoRa RX queue full, dropping message!");
                     }
                 }
             }
             
-            // Forward to BLE
-            pTxCharacteristic->setValue(actualPayload, actualPayloadLen);
-            pTxCharacteristic->notify();
-            bleTxCount++;
+            // Immediately return to receive mode
+            radio.startReceive();
+            xSemaphoreGive(radioMutex);
+        }
+    }
+}
+
+// LoRa TX Task - handles transmissions with smart collision avoidance
+void loraTxTask(void* parameter) {
+    QueuedMessage msg;
+    uint32_t lastTransmitTime = 0;
+    
+    while (true) {
+        if (xQueueReceive(loraTxQueue, &msg, pdMS_TO_TICKS(10)) == pdTRUE) {
+            // Smart collision avoidance
+            uint32_t now = millis();
+            uint32_t timeSinceLastTx = now - lastTransmitTime;
             
-            Serial.println("│ Action: ✓ FORWARDED TO BLE CLIENT                   │");
-            Serial.printf("│ BLE TX: %d bytes sent to connected device          │\n", actualPayloadLen);
-            
-            // If it's a status message, also log the status info
-            if (isStatusMessage) {
-                String statusStr((char*)actualPayload, actualPayloadLen);
-                Serial.printf("│ Status Info: %s │\n", statusStr.c_str());
+            // Wait until scheduled time if set
+            if (msg.scheduledTransmitTime > now) {
+                vTaskDelay(pdMS_TO_TICKS(msg.scheduledTransmitTime - now));
             }
-        } else {
-            // Explain why we're not forwarding
-            if (isOurMessage) {
-                Serial.println("│ Action: ✗ NOT FORWARDED (our own message)          │");
-            } else if (!deviceConnected) {
-                Serial.println("│ Action: ✗ NOT FORWARDED (no BLE client connected)  │");
+            
+            // Additional backoff if we're transmitting too frequently
+            if (timeSinceLastTx < currentBackoff) {
+                uint32_t additionalDelay = currentBackoff - timeSinceLastTx;
+                vTaskDelay(pdMS_TO_TICKS(additionalDelay));
+                collisionBackoffs++;
+            }
+            
+            if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                int state = radio.transmit(msg.data, msg.len);
+                
+                if (state == RADIOLIB_ERR_NONE) {
+                    loraTxCount++;
+                    lastTransmitTime = millis();
+                    
+                    // Reduce backoff on success
+                    currentBackoff = max(BASE_BACKOFF_MS, currentBackoff * 3 / 4);
+                } else {
+                    // Increase backoff on failure
+                    currentBackoff = min(MAX_BACKOFF_MS, currentBackoff * 2);
+                    Serial.printf("[ERROR] LoRa TX failed: %d, backoff now %dms\n", 
+                                 state, currentBackoff);
+                }
+                
+                // Return to receive mode
+                radio.startReceive();
+                xSemaphoreGive(radioMutex);
             }
         }
-        
-        // Re-broadcast decision (mesh networking)
-        if (isNewMessage && frame->hdr.ttl > 1 && !isOurMessage) {
-            Serial.println("│ Mesh Action: PREPARING TO RE-BROADCAST              │");
-            
-            frame->hdr.ttl--;
-            frame->hdr.hop++;
-            
-            // Add random delay to avoid collisions
-            int delayMs = random(50, 200);
-            Serial.printf("│ Collision Avoidance Delay: %d ms                   │\n", delayMs);
-            delay(delayMs);
-            
-            int state = radio.transmit(buffer, len);
-            if (state == RADIOLIB_ERR_NONE) {
-                loraTxCount++;
-                Serial.println("│ Re-broadcast: ✓ SUCCESS                             │");
-            } else {
-                Serial.printf("│ Re-broadcast: ✗ FAILED (error %d)                  │\n", state);
-            }
-        } else {
-            // Explain why we're not re-broadcasting
-            if (!isNewMessage) {
-                Serial.println("│ Mesh Action: ✗ NO RE-BROADCAST (duplicate msg)     │");
-            } else if (frame->hdr.ttl <= 1) {
-                Serial.println("│ Mesh Action: ✗ NO RE-BROADCAST (TTL expired)       │");
-            } else if (isOurMessage) {
-                Serial.println("│ Mesh Action: ✗ NO RE-BROADCAST (our message)       │");
-            }
+    }
+}
+
+// Main message processing task - handles routing logic
+void messageProcessingTask(void* parameter) {
+    QueuedMessage msg;
+    
+    while (true) {
+        // Process LoRa RX messages
+        if (xQueueReceive(loraRxQueue, &msg, pdMS_TO_TICKS(10)) == pdTRUE) {
+            processLoRaMessage(&msg);
         }
         
-        Serial.println("└──────────────────────────────────────────────────────┘");
-        updateStats();
+        // Process BLE RX messages
+        if (xQueueReceive(bleRxQueue, &msg, pdMS_TO_TICKS(10)) == pdTRUE) {
+            processBleMessage(&msg);
+        }
+    }
+}
+
+// Process a received LoRa message
+void processLoRaMessage(QueuedMessage* msg) {
+    if (msg->len < sizeof(BridgeHdr)) return;
+    
+    Frame* frame = (Frame*)msg->data;
+    
+    // Validate magic
+    if (frame->hdr.magic != BRIDGE_MAGIC) {
+        return;
     }
     
-    // Restart receive mode
-    radio.startReceive();
+    loraRxCount++;
+    
+    // Check if this is our own message
+    bool isOurMessage = false;
+    if (xSemaphoreTake(cacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        isOurMessage = (ourMessages.find(frame->hdr.msg_id) != ourMessages.end());
+        xSemaphoreGive(cacheMutex);
+    }
+    
+    // Check for duplicates
+    bool isNewMessage = false;
+    if (xSemaphoreTake(cacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        isNewMessage = !isDuplicateLocked(frame->hdr.msg_id);
+        xSemaphoreGive(cacheMutex);
+    }
+    
+    // Forward to BLE if appropriate
+    if (deviceConnected && !isOurMessage && frame->hdr.payload_len > 0) {
+        QueuedMessage bleMsg;
+        uint8_t* payload = msg->data + sizeof(BridgeHdr) + sizeof(uint16_t);
+        memcpy(bleMsg.data, payload, frame->hdr.payload_len);
+        bleMsg.len = frame->hdr.payload_len;
+        bleMsg.receiveTime = msg->receiveTime;
+        
+        if (xQueueSend(bleTxQueue, &bleMsg, 0) != pdTRUE) {
+            droppedMessages++;
+            Serial.println("[WARNING] BLE TX queue full!");
+        }
+    }
+    
+    // Schedule re-broadcast if appropriate
+    if (isNewMessage && frame->hdr.ttl > 1 && !isOurMessage) {
+        frame->hdr.ttl--;
+        frame->hdr.hop++;
+        
+        QueuedMessage rebroadcast;
+        memcpy(rebroadcast.data, msg->data, msg->len);
+        rebroadcast.len = msg->len;
+        rebroadcast.isForRebroadcast = true;
+        
+        // Smart scheduling based on RSSI and current network load
+        uint32_t baseDelay = 20;  // Base delay in ms
+        
+        // Add delay based on signal strength (stronger signals wait longer)
+        if (msg->rssi > -50) {
+            baseDelay += 50;  // Very strong signal, wait longer
+        } else if (msg->rssi > -70) {
+            baseDelay += 30;  // Medium signal
+        }
+        
+        // Add random jitter
+        uint32_t jitter = random(0, 30);
+        rebroadcast.scheduledTransmitTime = millis() + baseDelay + jitter;
+        
+        if (xQueueSend(loraTxQueue, &rebroadcast, 0) != pdTRUE) {
+            droppedMessages++;
+            Serial.println("[WARNING] LoRa TX queue full!");
+        }
+    }
+}
+
+// BLE TX Task - handles sending to BLE clients
+void bleTask(void* parameter) {
+    QueuedMessage msg;
+    
+    while (true) {
+        if (xQueueReceive(bleTxQueue, &msg, pdMS_TO_TICKS(10)) == pdTRUE) {
+            if (deviceConnected && pTxCharacteristic) {
+                if (xSemaphoreTake(bleMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    pTxCharacteristic->setValue(msg.data, msg.len);
+                    pTxCharacteristic->notify();
+                    bleTxCount++;
+                    xSemaphoreGive(bleMutex);
+                }
+            }
+        }
+    }
 }
 
 // Check if message is duplicate (for re-broadcast decision)
@@ -597,6 +686,129 @@ void broadcastGatewayStatus() {
     }
 }
 
+// After the existing isDuplicate function, add the thread-safe version
+bool isDuplicateLocked(uint64_t msgId) {
+    // This version assumes the mutex is already held by the caller
+    cleanupMessageCache();
+    
+    if (messageCache.find(msgId) != messageCache.end()) {
+        return true;
+    }
+    
+    // Add to cache
+    MessageInfo info = {msgId, 0, millis()};
+    messageCache[msgId] = info;
+    
+    // Limit cache size
+    while (messageCache.size() > MAX_CACHE_SIZE) {
+        messageCache.erase(messageCache.begin());
+    }
+    
+    // Clean up our messages set too
+    if (ourMessages.size() > MAX_CACHE_SIZE) {
+        ourMessages.clear();  // Simple cleanup
+    }
+    
+    return false;
+}
+
+// Add the processBleMessage function
+void processBleMessage(QueuedMessage* msg) {
+    bleRxCount++;
+    
+    Serial.printf("\n[%s] ━━━ BLE RX #%lu: %d bytes ━━━\n", 
+                 gatewayName.c_str(), bleRxCount, msg->len);
+    
+    // Get message type description
+    String msgType = getMessageTypeDescription(msg->data, msg->len);
+    Serial.printf("Message Type: %s\n", msgType.c_str());
+    
+    // Try to extract nickname from BitChat message
+    String messageStr((const char*)msg->data, msg->len);
+    
+    // Look for patterns like "nickname connected" or messages from specific senders
+    if (messageStr.indexOf(" connected") > 0 && messageStr.indexOf("system") < 0) {
+        int spacePos = messageStr.indexOf(" connected");
+        if (spacePos > 0) {
+            String nickname = messageStr.substring(0, spacePos);
+            nickname.trim();
+            if (nickname.length() > 0 && nickname != "system") {
+                bool found = false;
+                for (const auto& n : connectedDeviceNicknames) {
+                    if (n == nickname) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    connectedDeviceNicknames.push_back(nickname);
+                    Serial.printf("[%s] Added connected device: %s\n", 
+                                gatewayName.c_str(), nickname.c_str());
+                }
+            }
+        }
+    }
+    
+    // Wrap in bridge header and forward to LoRa
+    Frame frame;
+    memset(&frame, 0, sizeof(Frame));
+    
+    frame.hdr.magic = BRIDGE_MAGIC;
+    frame.hdr.ver = 1;
+    frame.hdr.ttl = defaultTTL;
+    frame.hdr.msg_id = ((uint64_t)random(0xFFFFFFFF) << 32) | millis();
+    frame.hdr.gw_id = gatewayId;
+    frame.hdr.frag_idx = 0;
+    frame.hdr.frag_total = 1;
+    frame.hdr.payload_len = msg->len;
+    frame.hdr.hop = 0;
+    frame.hdr.crc16 = 0;
+    
+    frame.len = msg->len;
+    memcpy(frame.data, msg->data, msg->len);
+    
+    // Track that we sent this message
+    if (xSemaphoreTake(cacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        ourMessages.insert(frame.hdr.msg_id);
+        
+        // Add to cache
+        MessageInfo info = {frame.hdr.msg_id, gatewayId, millis()};
+        messageCache[frame.hdr.msg_id] = info;
+        xSemaphoreGive(cacheMutex);
+    }
+    
+    // Queue for transmission
+    QueuedMessage loraMsg;
+    size_t totalLen = sizeof(BridgeHdr) + sizeof(uint16_t) + frame.len;
+    memcpy(loraMsg.data, &frame, totalLen);
+    loraMsg.len = totalLen;
+    loraMsg.receiveTime = millis();
+    loraMsg.scheduledTransmitTime = millis();  // Send immediately
+    
+    if (xQueueSend(loraTxQueue, &loraMsg, 0) != pdTRUE) {
+        droppedMessages++;
+        Serial.println("[WARNING] LoRa TX queue full!");
+    } else {
+        Serial.println("┌─── BLE → LoRa QUEUED ────────────────────────────────┐");
+        Serial.printf("│ Message ID: 0x%016llX                       │\n", frame.hdr.msg_id);
+        Serial.printf("│ Payload Size: %d bytes                              │\n", msg->len);
+        Serial.printf("│ Message Type: %s                                     │\n", msgType.c_str());
+        Serial.println("└──────────────────────────────────────────────────────┘");
+    }
+    
+    // Send echo response
+    if (pTxCharacteristic) {
+        String response = "Echo: " + String(bleRxCount);
+        QueuedMessage echoMsg;
+        memcpy(echoMsg.data, response.c_str(), response.length());
+        echoMsg.len = response.length();
+        
+        if (xQueueSend(bleTxQueue, &echoMsg, 0) == pdTRUE) {
+            Serial.printf("Queued echo response: '%s'\n", response.c_str());
+        }
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     delay(2000);
@@ -669,7 +881,7 @@ void setup() {
         GATEWAY_RX_CHAR_UUID,
         NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
     );
-    pRxCharacteristic->setCallbacks(new MyRxCallbacks());
+    pRxCharacteristic->setCallbacks(new ImprovedRxCallbacks());
     
     pConfigCharacteristic = pService->createCharacteristic(
         GATEWAY_CONFIG_CHAR_UUID,
@@ -710,26 +922,83 @@ void setup() {
     Serial.println("Type 'help' for available commands\n");
     
     updateStats();
+
+    // Create queues
+    loraRxQueue = xQueueCreate(20, sizeof(QueuedMessage));
+    loraTxQueue = xQueueCreate(20, sizeof(QueuedMessage));
+    bleRxQueue = xQueueCreate(10, sizeof(QueuedMessage));
+    bleTxQueue = xQueueCreate(10, sizeof(QueuedMessage));
+    
+    // Create semaphores
+    radioMutex = xSemaphoreCreateMutex();
+    bleMutex = xSemaphoreCreateMutex();
+    cacheMutex = xSemaphoreCreateMutex();
+    
+    // Create tasks on different cores for better performance
+    xTaskCreatePinnedToCore(
+        loraRxTask,
+        "LoRa RX",
+        4096,
+        NULL,
+        2,  // High priority
+        &loraRxTaskHandle,
+        0   // Core 0
+    );
+    
+    xTaskCreatePinnedToCore(
+        loraTxTask,
+        "LoRa TX",
+        4096,
+        NULL,
+        1,  // Medium priority
+        &loraTxTaskHandle,
+        0   // Core 0
+    );
+    
+    xTaskCreatePinnedToCore(
+        messageProcessingTask,
+        "Message Processing",
+        8192,
+        NULL,
+        1,  // Medium priority
+        NULL,
+        1   // Core 1
+    );
+    
+    xTaskCreatePinnedToCore(
+        bleTask,
+        "BLE Handler",
+        4096,
+        NULL,
+        1,  // Medium priority
+        NULL,
+        1   // Core 1
+    );
+    
+    Serial.println("=== Gateway Ready with Improved Message Handling ===");
 }
 
+// Simplified main loop
 void loop() {
-    // Process LoRa receives
-    processLoRaReceive();
-    
     // Process serial commands
     processSerialCommand();
     
-    // Periodic status
+    // Periodic status with performance metrics
     static uint32_t lastStatus = 0;
     if (millis() - lastStatus > 15000) {
         lastStatus = millis();
         
-        Serial.printf("\n[%s] === Status Update ===\n", gatewayName.c_str());
+        Serial.printf("\n[%s] === Enhanced Status Update ===\n", gatewayName.c_str());
         Serial.printf("Uptime: %lu s\n", millis()/1000);
         Serial.printf("BLE: RX=%lu TX=%lu Connected=%d\n", 
                      bleRxCount, bleTxCount, deviceConnected);
         Serial.printf("LoRa: RX=%lu TX=%lu\n", loraRxCount, loraTxCount);
-        Serial.printf("Cache size: %d messages\n", messageCache.size());
+        Serial.printf("Performance: Dropped=%lu QueueOverflows=%lu Backoffs=%lu\n",
+                     droppedMessages, queueOverflows, collisionBackoffs);
+        Serial.printf("Current Backoff: %dms\n", currentBackoff);
+        Serial.printf("Queue Status: LoRaRX=%d/%d LoRaTX=%d/%d\n",
+                     uxQueueMessagesWaiting(loraRxQueue), 20,
+                     uxQueueMessagesWaiting(loraTxQueue), 20);
         Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
     }
     
@@ -749,5 +1018,5 @@ void loop() {
         broadcastGatewayStatus();
     }
     
-    delay(10);
+    vTaskDelay(pdMS_TO_TICKS(10));
 }
