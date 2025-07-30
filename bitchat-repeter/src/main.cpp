@@ -202,6 +202,14 @@ void sendLoRaMessage(const uint8_t* data, size_t len) {
         return;
     }
     
+    // DEBUG: Log incoming data
+    Serial.printf("\n│ DEBUG sendLoRaMessage: Received %d bytes to send    │\n", len);
+    Serial.printf("│ DEBUG sendLoRaMessage: First 30 chars: '");
+    for (size_t i = 0; i < min(len, (size_t)30); i++) {
+        Serial.printf("%c", data[i]);
+    }
+    Serial.printf("'│\n");
+    
     // Wrap in bridge header
     Frame frame;
     memset(&frame, 0, sizeof(Frame));
@@ -220,6 +228,9 @@ void sendLoRaMessage(const uint8_t* data, size_t len) {
     frame.len = len;
     memcpy(frame.data, data, len);
     
+    // DEBUG: Verify payload in frame
+    Serial.printf("│ DEBUG: frame.hdr.payload_len set to: %d            │\n", frame.hdr.payload_len);
+    
     // Track that we sent this message
     ourMessages.insert(frame.hdr.msg_id);
     
@@ -228,7 +239,7 @@ void sendLoRaMessage(const uint8_t* data, size_t len) {
     messageCache[frame.hdr.msg_id] = info;
     
     // Transmit over LoRa
-    size_t totalLen = sizeof(BridgeHdr) + frame.len;
+    size_t totalLen = sizeof(BridgeHdr) + sizeof(uint16_t) + frame.len;
     
     Serial.println("┌─── BLE → LoRa TRANSMISSION ──────────────────────────┐");
     Serial.printf("│ Source: BLE Client via %s                           │\n", gatewayName.c_str());
@@ -317,9 +328,21 @@ void processLoRaReceive() {
         bool isNewMessage = !isDuplicate(frame->hdr.msg_id);
         
         // Get message type
-        uint8_t* payload = buffer + sizeof(BridgeHdr);
+        uint8_t* payload = buffer + sizeof(BridgeHdr) + sizeof(uint16_t);  // Skip the len field
         String msgType = getMessageTypeDescription(payload, frame->hdr.payload_len);
         Serial.printf("│ Message Type: %s                                     │\n", msgType.c_str());
+        
+        // DEBUG: Log payload details
+        Serial.printf("│ DEBUG: payload_len from header: %d                  │\n", frame->hdr.payload_len);
+        Serial.printf("│ DEBUG: First 30 chars of payload: '");
+        for (int i = 0; i < min(30, (int)frame->hdr.payload_len); i++) {
+            if (payload[i] >= 32 && payload[i] <= 126) {
+                Serial.printf("%c", payload[i]);
+            } else {
+                Serial.printf("\\x%02X", payload[i]);
+            }
+        }
+        Serial.printf("'│\n");
         
         // Check if this is a status message
         bool isStatusMessage = (msgType == "Gateway Status Broadcast");
@@ -347,17 +370,47 @@ void processLoRaReceive() {
             // Extract the BitChat payload
             size_t payloadLen = frame->hdr.payload_len;
             
+            // DEBUG: About to forward to BLE
+            Serial.printf("│ DEBUG: About to send %d bytes to BLE               │\n", payloadLen);
+            Serial.printf("│ DEBUG: BLE payload content: '");
+            for (size_t i = 0; i < min(payloadLen, (size_t)30); i++) {
+                if (payload[i] >= 32 && payload[i] <= 126) {
+                    Serial.printf("%c", payload[i]);
+                } else {
+                    Serial.printf("\\x%02X", payload[i]);
+                }
+            }
+            Serial.printf("'│\n");
+            
+            // Check if this is a STATUS message that might have control characters
+            uint8_t* actualPayload = payload;
+            size_t actualPayloadLen = payloadLen;
+            
+            // Skip any leading control characters for STATUS messages
+            if (payloadLen >= 8) {
+                // Look for STATUS pattern, possibly with leading control chars
+                for (size_t i = 0; i <= min((size_t)2, payloadLen - 6); i++) {
+                    if (memcmp(payload + i, "STATUS", 6) == 0) {
+                        // Found STATUS at position i, skip control chars
+                        actualPayload = payload + i;
+                        actualPayloadLen = payloadLen - i;
+                        Serial.printf("│ DEBUG: Found STATUS at offset %d, adjusted len: %d │\n", i, actualPayloadLen);
+                        break;
+                    }
+                }
+            }
+            
             // Forward to BLE
-            pTxCharacteristic->setValue(payload, payloadLen);
+            pTxCharacteristic->setValue(actualPayload, actualPayloadLen);
             pTxCharacteristic->notify();
             bleTxCount++;
             
             Serial.println("│ Action: ✓ FORWARDED TO BLE CLIENT                   │");
-            Serial.printf("│ BLE TX: %d bytes sent to connected device          │\n", payloadLen);
+            Serial.printf("│ BLE TX: %d bytes sent to connected device          │\n", actualPayloadLen);
             
             // If it's a status message, also log the status info
             if (isStatusMessage) {
-                String statusStr((char*)payload, frame->hdr.payload_len);
+                String statusStr((char*)actualPayload, actualPayloadLen);
                 Serial.printf("│ Status Info: %s │\n", statusStr.c_str());
             }
         } else {
@@ -523,6 +576,10 @@ void broadcastGatewayStatus() {
             statusMsg += connectedDeviceNicknames[i];
         }
     }
+    
+    // DEBUG: Log exact message and length
+    Serial.printf("\n│ DEBUG: STATUS message content: '%s'                 │\n", statusMsg.c_str());
+    Serial.printf("│ DEBUG: STATUS message length: %d bytes              │\n", statusMsg.length());
     
     Serial.println("\n┌─── GATEWAY STATUS BROADCAST ─────────────────────────┐");
     Serial.printf("│ Broadcasting gateway status to mesh network          │\n");

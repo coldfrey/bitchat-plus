@@ -17,6 +17,7 @@
 ///
 
 import SwiftUI
+import Combine
 
 // Message tracking for debug view
 struct GatewayMessage: Identifiable {
@@ -44,6 +45,7 @@ struct GatewayDebugView: View {
     @State private var showOnlyStatus = false
     @State private var connectionStartTime: Date?
     @State private var messageListener: Task<Void, Never>?
+    @State private var frameCancellable: AnyCancellable?
     
     private var gatewayTransport: GatewayTransport? {
         viewModel.gatewayTransport
@@ -171,14 +173,13 @@ struct GatewayDebugView: View {
             }
             .navigationTitle("Gateway Debug")
             .navigationBarTitleDisplayMode(.inline)
-            .task {
-                await startMessageListener()
-            }
             .onAppear {
                 setupGatewayObservers()
+                startMessageListener()
             }
             .onDisappear {
                 messageListener?.cancel()
+                frameCancellable?.cancel()
             }
         }
     }
@@ -346,21 +347,14 @@ struct GatewayDebugView: View {
     
     private func parseStatusDetails(_ content: String) -> String? {
         // Parse STATUS|gateway_id|gateway_name|connected_count|nicknames
-        let parts = content.split(separator: "|")
-        guard parts.count >= 4, parts[0] == "STATUS" else { return nil }
+        let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmedContent.split(separator: "|")
+        guard parts.count >= 3, parts[0] == "STATUS" else { return nil }
         
-        let gatewayId = String(parts[1])
         let gatewayName = String(parts[2])
-        let connectedCount = String(parts[3])
+        let connectedCount = parts.count >= 4 ? String(parts[3]) : "0"
         
-        var details = "\(gatewayName) (ID: \(gatewayId)): \(connectedCount) devices"
-        
-        if parts.count > 4 && !parts[4].isEmpty {
-            let nicknames = String(parts[4])
-            details += " - Users: \(nicknames)"
-        }
-        
-        return details
+        return "\(gatewayName): \(connectedCount) devices"
     }
     
     // MARK: - Gateway Operations
@@ -376,42 +370,43 @@ struct GatewayDebugView: View {
         }
     }
     
-    private func startMessageListener() async {
+    private func startMessageListener() {
         guard let gateway = gatewayTransport else {
             print("GatewayDebugView: Gateway transport not available for message listening")
             return
         }
         
-        // Cancel any existing listener
-        messageListener?.cancel()
+        // Cancel any existing subscriptions
+        frameCancellable?.cancel()
         
-        messageListener = Task {
-            for await frame in gateway.frames {
-                guard !Task.isCancelled else { break }
+        // Subscribe to the frame publisher
+        frameCancellable = gateway.framePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { frame in
                 
-                await MainActor.run {
-                    let content = String(data: frame, encoding: .utf8) ?? frame.hexEncodedString()
-                    let isStatus = content.hasPrefix("STATUS|")
-                    
-                    let message = GatewayMessage(
-                        timestamp: Date(),
-                        direction: .received,
-                        content: content,
-                        size: frame.count,
-                        isStatus: isStatus
-                    )
-                    
-                    messages.append(message)
-                    
-                    // Keep only last 100 messages
-                    if messages.count > 100 {
-                        messages.removeFirst(messages.count - 100)
-                    }
-                    
-                    print("GatewayDebugView: Received frame: \(frame.count) bytes - \(content)")
+                let content = String(data: frame, encoding: .utf8) ?? frame.hexEncodedString()
+                
+                // Trim whitespace before checking for STATUS
+                let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                let isStatus = trimmedContent.hasPrefix("STATUS|")
+                
+                let message = GatewayMessage(
+                    timestamp: Date(),
+                    direction: .received,
+                    content: content,  // Keep original content for display
+                    size: frame.count,
+                    isStatus: isStatus
+                )
+                
+                self.messages.append(message)
+                
+                // Keep only last 100 messages
+                if self.messages.count > 100 {
+                    self.messages.removeFirst(self.messages.count - 100)
                 }
+                
+                print("GatewayDebugView: Received frame: \(frame.count) bytes - \(content)")
             }
-        }
     }
     
     private func sendTestMessage() {
@@ -504,7 +499,9 @@ struct GatewayDebugView: View {
                 }
                 
                 // Restart message listener
-                await startMessageListener()
+                await MainActor.run {
+                    startMessageListener()
+                }
             }
         }
     }

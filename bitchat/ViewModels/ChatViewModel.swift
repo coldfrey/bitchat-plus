@@ -224,7 +224,57 @@ class ChatViewModel: ObservableObject {
                 }
                 .store(in: &cancellables)
                 
-            // Start services
+            // Listen for gateway frames using publisher
+            gatewayTransport.framePublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] frame in
+                    guard let self = self else { return }
+                    
+                    // Convert frame to string and check if it's a STATUS message
+                    if let frameString = String(data: frame, encoding: .utf8) {
+                        // Clean the string by removing control characters
+                        let cleanedString = frameString.filter { char in
+                            let scalar = char.unicodeScalars.first!
+                            return scalar.value >= 32 && scalar.value <= 126
+                        }
+                        
+                        // Check if this is a STATUS message
+                        if cleanedString.hasPrefix("STATUS|") {
+                            // Parse and update gateway peers
+                            if let statusInfo = parseGatewayStatus(cleanedString) {
+                                updateGatewayPeers(from: statusInfo)
+                            }
+                            // Don't process STATUS messages as chat messages
+                            return
+                        }
+                        
+                        // Ignore other debug messages
+                        if cleanedString.hasPrefix("Echo:") || cleanedString.hasPrefix("Heartbeat:") {
+                            return
+                        }
+                    }
+                    
+                    // Log non-STATUS/debug frames for debugging
+                    let frameString = String(data: frame, encoding: .utf8) ?? frame.hexEncodedString()
+                    print("ChatViewModel: Received gateway frame (\(frame.count) bytes): \(frameString)")
+                    
+                    // Try to parse as BitChat message
+                    if let message = BitchatMessage.fromBinaryPayload(frame) {
+                        // Mark as received through gateway
+                        message.sentViaGateway = true
+                        
+                        // Process the message
+                        didReceiveMessage(message)
+                        
+                        print("ChatViewModel: Successfully processed BitChat message via gateway from \(message.sender)")
+                    } else {
+                        // Not a BitChat message - this is expected for some message types
+                        print("ChatViewModel: Frame is not a valid BitChat message")
+                    }
+                }
+                .store(in: &cancellables)
+                
+            // Start gateway transport
             await gatewayTransport.start()
         }
         
@@ -237,71 +287,6 @@ class ChatViewModel: ObservableObject {
             .sink { [weak self] (messageID, status) in
                 self?.updateMessageDeliveryStatus(messageID, status: status)
             }
-        
-        // Listen for gateway frames
-        Task { @MainActor in
-            guard let gateway = gatewayTransport else { return }
-            
-            for await frame in gateway.frames {
-                // Log all frames for debugging
-                let frameString = String(data: frame, encoding: .utf8) ?? frame.hexEncodedString()
-                print("ChatViewModel: Received gateway frame: \(frameString)")
-                
-                // Process based on message type
-                if frameString.hasPrefix("STATUS|") {
-                    // Status messages are already handled by GatewayTransport
-                    print("ChatViewModel: Status message processed by GatewayTransport")
-                    // DO NOT process as a chat message - these are for debug view only
-                } else if frameString.hasPrefix("Echo:") || frameString.hasPrefix("Heartbeat:") {
-                    // Debug/test messages - just log them
-                    print("ChatViewModel: Debug message: \(frameString)")
-                    // DO NOT process as a chat message
-                } else {
-                    // This is a regular BitChat message from gateway
-                    // The gateway sends raw BitChat message payloads, not full packets
-                    if let message = BitchatMessage.fromBinaryPayload(frame) {
-                        // Mark as received through gateway
-                        message.sentViaGateway = true
-                        
-                        // Gateway messages don't have senderPeerID since they're not wrapped in BitchatPacket
-                        // We'll use a special gateway prefix for the sender ID
-                        if message.senderPeerID == nil {
-                            print("ChatViewModel: Gateway message from \(message.sender) has no peer ID")
-                        }
-                        
-                        // Process the message
-                        didReceiveMessage(message)
-                        
-                        print("ChatViewModel: Processed BitChat message via gateway from \(message.sender)")
-                    } else {
-                        // If it's not a valid BitChat message, check if it's a debug/status message
-                        if let textContent = String(data: frame, encoding: .utf8) {
-                            // Check if this is a status or debug message that shouldn't be shown
-                            if textContent.hasPrefix("STATUS|") || 
-                               textContent.hasPrefix("Echo:") || 
-                               textContent.hasPrefix("Heartbeat:") {
-                                print("ChatViewModel: Ignoring debug/status message: \(textContent)")
-                                // DO NOT process as a chat message
-                            } else {
-                                // Only process as a chat message if it's not a debug/status message
-                                print("ChatViewModel: Processing as raw text message: \(textContent)")
-                                let message = BitchatMessage(
-                                    sender: "gateway",
-                                    content: textContent,
-                                    timestamp: Date(),
-                                    isRelay: false,
-                                    originalSender: nil
-                                )
-                                message.sentViaGateway = true
-                                didReceiveMessage(message)
-                            }
-                        } else {
-                            print("ChatViewModel: Failed to decode gateway frame in any format")
-                        }
-                    }
-                }
-            }
-        }
         
         // Log startup info
         
@@ -1735,6 +1720,7 @@ class ChatViewModel: ObservableObject {
     }
     
     private func addMessageToBatch(_ message: BitchatMessage) {
+        print("ChatViewModel: Adding message to batch from \(message.sender): \(message.content)")
         pendingMessages.append(message)
         scheduleBatchFlush()
     }
@@ -2015,7 +2001,53 @@ class ChatViewModel: ObservableObject {
     
     // MARK: - Gateway Management
     
+    private func parseGatewayStatus(_ statusMessage: String) -> GatewayStatusInfo? {
+        // Parse STATUS|gateway_id|gateway_name|connected_count|nicknames
+        let trimmedMessage = statusMessage.trimmingCharacters(in: .whitespaces)
+        let parts = trimmedMessage.split(separator: "|")
+        guard parts.count >= 3, parts[0] == "STATUS" else { return nil }
+        
+        let gatewayId = String(parts[1])
+        let gatewayName = String(parts[2])
+        
+        // Handle both formats: with and without connected count
+        let connectedCount: Int
+        var nicknames: [String] = []
+        
+        if parts.count >= 4 {
+            // Has connected count
+            connectedCount = Int(parts[3]) ?? 0
+            if parts.count > 4 {
+                nicknames = String(parts[4]).split(separator: ",").map { String($0) }
+            }
+        } else {
+            // No connected count - assume 0
+            connectedCount = 0
+        }
+        
+        return GatewayStatusInfo(
+            gatewayId: gatewayId,
+            gatewayName: gatewayName,
+            connectedCount: connectedCount,
+            nicknames: nicknames
+        )
+    }
+    
+    @MainActor
     private func updateGatewayPeers(from statusInfo: GatewayStatusInfo) {
+        // Update the gateway transport's status dictionary so it knows about all gateways
+        if let transport = gatewayTransport {
+            let previousStatus = transport.gatewayStatuses[statusInfo.gatewayId]
+            transport.gatewayStatuses[statusInfo.gatewayId] = statusInfo
+            
+            // Only log if this is a new gateway or the count changed
+            if previousStatus == nil {
+                print("ChatViewModel: New gateway discovered: \(statusInfo.gatewayName) (ID: \(statusInfo.gatewayId)) - \(statusInfo.connectedCount) devices")
+            } else if previousStatus?.connectedCount != statusInfo.connectedCount {
+                print("ChatViewModel: Gateway \(statusInfo.gatewayName) device count changed: \(previousStatus?.connectedCount ?? 0) -> \(statusInfo.connectedCount)")
+            }
+        }
+        
         // Remove old peers from this gateway
         gatewayPeers.removeAll { $0.gatewayId == statusInfo.gatewayId }
         
