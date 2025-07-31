@@ -724,7 +724,7 @@ void setup() {
     digitalWrite(VEXT_ENABLE, LOW);  // Enable Vext
     
     // Initialize modules
-    // ConfigManager::init();
+    ConfigManager::init();  // Initialize configuration first
     PowerManager::init();   // Initialize power management first
     MessageRouter::init();  // Initialize message router first
     BLEMesh::init();
