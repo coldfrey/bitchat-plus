@@ -45,6 +45,12 @@ private:
     static void sendVersionAck(uint8_t agreedVersion, uint16_t connectionHandle);
     static bool isConnectionReady(uint16_t connectionHandle);
     
+    // Message type handlers
+    static void handleAnnounceMessage(const BitchatPacket& packet, uint16_t connectionHandle);
+    static void handleLeaveMessage(const BitchatPacket& packet, uint16_t connectionHandle);
+    static void handleChatMessage(const BitchatPacket& packet, uint16_t connectionHandle);
+    static void handleAckMessage(const BitchatPacket& packet, uint16_t connectionHandle);
+    
     // BLE Server callbacks
     static void startAdvertising();
     

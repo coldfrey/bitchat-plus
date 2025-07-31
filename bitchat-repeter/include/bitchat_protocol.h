@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <string.h>
 
 // BitChat Protocol Constants (extracted from iOS app)
 // Service and Characteristic UUIDs (from BluetoothMeshService.swift)
@@ -53,20 +54,35 @@
 #define PROTOCOL_VERSION            1
 #define DEFAULT_TTL                 10
 
-// BitchatPacket structure (from BitchatProtocol.swift)
+// Simplified BitchatPacket structure for v1 implementation
 struct BitchatPacket {
     uint8_t version;        // Protocol version
     uint8_t type;           // Message type (from MessageType enum)
-    uint8_t* senderID;      // 8-byte sender ID
-    uint8_t* recipientID;   // 8-byte recipient ID (optional)
-    uint64_t timestamp;     // Unix timestamp
-    uint8_t* payload;       // Variable length payload
-    uint8_t* signature;     // 64-byte signature (optional)
-    uint8_t ttl;           // Time to live
+    uint8_t senderID[8];    // 8-byte sender ID (fixed array)
+    uint8_t recipientID[8]; // 8-byte recipient ID (all zeros for broadcast)
+    uint64_t timestamp;     // Unix timestamp in milliseconds
+    uint8_t ttl;           // Time to live (hop count)
     uint16_t payloadLength; // Payload length
+    uint8_t* payload;       // Variable length payload (points to external buffer)
     
     // Constructor
-    BitchatPacket() : version(PROTOCOL_VERSION), type(0), senderID(nullptr), 
-                     recipientID(nullptr), timestamp(0), payload(nullptr), 
-                     signature(nullptr), ttl(DEFAULT_TTL), payloadLength(0) {}
+    BitchatPacket() : version(PROTOCOL_VERSION), type(0), timestamp(0), 
+                     ttl(DEFAULT_TTL), payloadLength(0), payload(nullptr) {
+        memset(senderID, 0, 8);
+        memset(recipientID, 0, 8);
+    }
 };
+
+// Packet parsing results
+enum ParseResult {
+    PARSE_SUCCESS = 0,
+    PARSE_TOO_SMALL = 1,
+    PARSE_INVALID_VERSION = 2,
+    PARSE_UNSUPPORTED_TYPE = 3,
+    PARSE_INCOMPLETE = 4
+};
+
+// Function declarations for packet handling
+ParseResult parsePacket(const uint8_t* data, size_t length, BitchatPacket& packet);
+size_t serializePacket(const BitchatPacket& packet, uint8_t* buffer, size_t bufferSize);
+bool isSupportedMessageType(uint8_t type);

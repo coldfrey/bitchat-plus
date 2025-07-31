@@ -130,20 +130,8 @@ void BLEMesh::handleReceivedData(const uint8_t* data, size_t length, uint16_t co
     }
     Serial.println();
     
-    // Minimum packet size check (version + type = 2 bytes minimum)
-    if (length < 2) {
-        Serial.println("BLE Mesh: Packet too small, ignoring");
-        return;
-    }
-    
-    // Parse message type
-    uint8_t version = data[0];
-    uint8_t type = data[1];
-    
-    Serial.printf("BLE Mesh: Packet version=%d, type=0x%02X\n", version, type);
-    
-    // Handle version negotiation messages
-    if (type == MSG_TYPE_VERSION_HELLO) {
+    // Quick check for VERSION_HELLO before full parsing
+    if (length >= 2 && data[1] == MSG_TYPE_VERSION_HELLO) {
         Serial.println("BLE Mesh: Received VERSION_HELLO");
         handleVersionHello(data, length, connectionHandle);
         return;
@@ -155,10 +143,48 @@ void BLEMesh::handleReceivedData(const uint8_t* data, size_t length, uint16_t co
         return;
     }
     
-    Serial.printf("BLE Mesh: Message accepted from ready connection %d\n", connectionHandle);
+    // Parse the BitChat packet
+    BitchatPacket packet;
+    ParseResult result = parsePacket(data, length, packet);
     
-    // TODO: Forward to message router for processing
-    // MessageRouter::handleBLEMessage(data, length, connectionHandle);
+    if (result != PARSE_SUCCESS) {
+        Serial.printf("BLE Mesh: Failed to parse packet from connection %d, error=%d\n", connectionHandle, result);
+        return;
+    }
+    
+    // Convert sender ID to hex string for logging
+    char senderHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+    }
+    senderHex[16] = '\0';
+    
+    Serial.printf("BLE Mesh: Parsed packet - Type=0x%02X, From=%s, TTL=%d\n", 
+                 packet.type, senderHex, packet.ttl);
+    
+    // Handle specific message types
+    switch (packet.type) {
+        case MSG_TYPE_ANNOUNCE:
+            handleAnnounceMessage(packet, connectionHandle);
+            break;
+            
+        case MSG_TYPE_LEAVE:
+            handleLeaveMessage(packet, connectionHandle);
+            break;
+            
+        case MSG_TYPE_MESSAGE:
+            handleChatMessage(packet, connectionHandle);
+            break;
+            
+        case MSG_TYPE_DELIVERY_ACK:
+        case MSG_TYPE_PROTOCOL_ACK:
+            handleAckMessage(packet, connectionHandle);
+            break;
+            
+        default:
+            Serial.printf("BLE Mesh: Unhandled message type 0x%02X\n", packet.type);
+            break;
+    }
 }
 
 // Server callback implementations
@@ -327,4 +353,102 @@ bool BLEMesh::isConnectionReady(uint16_t connectionHandle) {
         return false;
     }
     return it->second.isReady;
+}
+
+// Message type handlers
+void BLEMesh::handleAnnounceMessage(const BitchatPacket& packet, uint16_t connectionHandle) {
+    // Extract nickname from payload
+    String nickname = "";
+    if (packet.payload && packet.payloadLength > 0) {
+        // Convert payload to string (it should be UTF-8 text)
+        char* buffer = (char*)malloc(packet.payloadLength + 1);
+        memcpy(buffer, packet.payload, packet.payloadLength);
+        buffer[packet.payloadLength] = '\0';
+        nickname = String(buffer);
+        free(buffer);
+        nickname.trim(); // Remove whitespace
+    }
+    
+    // Convert sender ID to hex string
+    char senderHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+    }
+    senderHex[16] = '\0';
+    
+    Serial.printf("BLE Mesh: ANNOUNCE from %s: \"%s\" (TTL=%d)\n", 
+                 senderHex, nickname.c_str(), packet.ttl);
+    
+    // TODO: Forward to message router for LoRa mesh relay
+    // TODO: Update peer presence tracking
+}
+
+void BLEMesh::handleLeaveMessage(const BitchatPacket& packet, uint16_t connectionHandle) {
+    // Convert sender ID to hex string
+    char senderHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+    }
+    senderHex[16] = '\0';
+    
+    Serial.printf("BLE Mesh: LEAVE from %s (TTL=%d)\n", senderHex, packet.ttl);
+    
+    // TODO: Forward to message router for LoRa mesh relay
+    // TODO: Update peer presence tracking (remove peer)
+}
+
+void BLEMesh::handleChatMessage(const BitchatPacket& packet, uint16_t connectionHandle) {
+    // Convert sender and recipient IDs to hex strings
+    char senderHex[17], recipientHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+        sprintf(recipientHex + (i * 2), "%02X", packet.recipientID[i]);
+    }
+    senderHex[16] = recipientHex[16] = '\0';
+    
+    // Check if this is a broadcast (all zeros recipient) or private message
+    bool isBroadcast = true;
+    for (int i = 0; i < 8; i++) {
+        if (packet.recipientID[i] != 0) {
+            isBroadcast = false;
+            break;
+        }
+    }
+    
+    // Extract message text from payload (simplified - assumes plain text)
+    String messageText = "";
+    if (packet.payload && packet.payloadLength > 0) {
+        char* buffer = (char*)malloc(packet.payloadLength + 1);
+        memcpy(buffer, packet.payload, packet.payloadLength);
+        buffer[packet.payloadLength] = '\0';
+        messageText = String(buffer);
+        free(buffer);
+    }
+    
+    if (isBroadcast) {
+        Serial.printf("BLE Mesh: BROADCAST MESSAGE from %s: \"%s\" (TTL=%d)\n", 
+                     senderHex, messageText.c_str(), packet.ttl);
+    } else {
+        Serial.printf("BLE Mesh: PRIVATE MESSAGE from %s to %s: \"%s\" (TTL=%d)\n", 
+                     senderHex, recipientHex, messageText.c_str(), packet.ttl);
+    }
+    
+    // TODO: Forward to message router for LoRa mesh relay
+    // TODO: Apply message filtering and routing logic
+}
+
+void BLEMesh::handleAckMessage(const BitchatPacket& packet, uint16_t connectionHandle) {
+    // Convert sender ID to hex string
+    char senderHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+    }
+    senderHex[16] = '\0';
+    
+    const char* ackType = (packet.type == MSG_TYPE_DELIVERY_ACK) ? "DELIVERY_ACK" : "PROTOCOL_ACK";
+    
+    Serial.printf("BLE Mesh: %s from %s (TTL=%d)\n", ackType, senderHex, packet.ttl);
+    
+    // TODO: Forward to message router for LoRa mesh relay
+    // TODO: Update delivery tracking
 }

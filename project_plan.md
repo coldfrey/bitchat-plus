@@ -75,11 +75,11 @@ Simplify BLE implementation for iOS-only connections:
 6. Prepare clean interface for LoRa mesh integration (Phase 8)
 
 ### Prompt 2.3: Version Negotiation
-**Status: [ ] Not Started**
+**Status: [x] Completed**
 
 Implement the BitChat version negotiation protocol for iOS connections:
 1. As peripheral: wait for VERSION_HELLO (0x20) message after iOS connection
-2. Parse version from VERSION_HELLO and respond with VERSION_ACK (0x21) + version 3
+2. Parse version from VERSION_HELLO and respond with VERSION_ACK (0x21) + version 1
 3. Store negotiated version for each connected iOS device
 4. Set connection state to "ready" only after successful negotiation
 5. Reject messages from connections without completed negotiation
