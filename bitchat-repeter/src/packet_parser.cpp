@@ -1,5 +1,6 @@
 #include "bitchat_protocol.h"
 #include <Arduino.h>
+#include <esp_system.h>
 
 // Check if a message type is supported in our simplified v1 implementation
 bool isSupportedMessageType(uint8_t type) {
@@ -154,4 +155,190 @@ size_t serializePacket(const BitchatPacket& packet, uint8_t* buffer, size_t buff
                  offset, PACKET_HEADER_SIZE, packet.payloadLength);
     
     return offset;
+}
+
+// Check if a LoRa packet type is supported
+bool isSupportedLoRaPacketType(uint8_t type) {
+    switch (type) {
+        case LORA_PKT_NEIGHBOR_ANNOUNCE:  // 0x01 - Neighbor discovery
+        case LORA_PKT_ROUTE_REQUEST:      // 0x02 - Route discovery request
+        case LORA_PKT_ROUTE_REPLY:        // 0x03 - Route discovery reply
+        case LORA_PKT_DATA:               // 0x04 - Data packet (contains BitChat packet)
+        case LORA_PKT_MESH_ACK:           // 0x05 - Mesh acknowledgment
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Parse a LoRa packet from binary data
+LoRaParseResult parseLoRaPacket(const uint8_t* data, size_t length, LoRaPacket& packet) {
+    // Minimum packet size: header (20 bytes) + at least 1 byte payload
+    if (length < LORA_HEADER_SIZE) {
+        Serial.printf("LoRa Parser: Packet too small (%d bytes, need at least %d)\n", length, LORA_HEADER_SIZE);
+        return LORA_PARSE_TOO_SMALL;
+    }
+    
+    size_t offset = 0;
+    
+    // Parse magic (1 byte)
+    packet.magic = data[offset++];
+    if (packet.magic != LORA_MAGIC) {
+        Serial.printf("LoRa Parser: Invalid magic 0x%02X, expected 0x%02X\n", packet.magic, LORA_MAGIC);
+        return LORA_PARSE_INVALID_MAGIC;
+    }
+    
+    // Parse version (1 byte)
+    packet.version = data[offset++];
+    if (packet.version != LORA_VERSION) {
+        Serial.printf("LoRa Parser: Invalid version 0x%02X, expected 0x%02X\n", packet.version, LORA_VERSION);
+        return LORA_PARSE_INVALID_VERSION;
+    }
+    
+    // Parse type (1 byte)
+    packet.type = data[offset++];
+    if (!isSupportedLoRaPacketType(packet.type)) {
+        Serial.printf("LoRa Parser: Unsupported packet type 0x%02X\n", packet.type);
+        return LORA_PARSE_UNSUPPORTED_TYPE;
+    }
+    
+    // Parse source repeater ID (4 bytes, big-endian)
+    packet.srcRepeater = 0;
+    for (int i = 0; i < 4; i++) {
+        packet.srcRepeater = (packet.srcRepeater << 8) | data[offset++];
+    }
+    
+    // Parse destination repeater ID (4 bytes, big-endian)
+    packet.destRepeater = 0;
+    for (int i = 0; i < 4; i++) {
+        packet.destRepeater = (packet.destRepeater << 8) | data[offset++];
+    }
+    
+    // Parse next hop repeater ID (4 bytes, big-endian)
+    packet.nextHop = 0;
+    for (int i = 0; i < 4; i++) {
+        packet.nextHop = (packet.nextHop << 8) | data[offset++];
+    }
+    
+    // Parse hop count (1 byte)
+    packet.hopCount = data[offset++];
+    
+    // Parse max hops (1 byte)
+    packet.maxHops = data[offset++];
+    if (packet.maxHops > LORA_MAX_HOPS_LIMIT) {
+        Serial.printf("LoRa Parser: Max hops %d exceeds limit %d\n", packet.maxHops, LORA_MAX_HOPS_LIMIT);
+        packet.maxHops = LORA_MAX_HOPS_LIMIT;
+    }
+    
+    // Parse sequence number (2 bytes, big-endian)
+    packet.seqNum = (data[offset] << 8) | data[offset + 1];
+    offset += 2;
+    
+    // Parse payload length (1 byte)
+    packet.payloadLen = data[offset++];
+    if (packet.payloadLen > LORA_MAX_PAYLOAD_SIZE) {
+        Serial.printf("LoRa Parser: Payload length %d exceeds maximum %d\n", packet.payloadLen, LORA_MAX_PAYLOAD_SIZE);
+        return LORA_PARSE_PAYLOAD_TOO_LARGE;
+    }
+    
+    // Verify we have enough data for the payload
+    if (length < offset + packet.payloadLen) {
+        Serial.printf("LoRa Parser: Incomplete packet, expected %d bytes for payload\n", offset + packet.payloadLen);
+        return LORA_PARSE_TOO_SMALL;
+    }
+    
+    // Copy payload data
+    memcpy(packet.payload, data + offset, packet.payloadLen);
+    
+    // Debug output
+    Serial.printf("LoRa Parser: SUCCESS - Type=0x%02X, Src=%08X, Dest=%08X, NextHop=%08X, Hops=%d/%d, Seq=%d, PayloadLen=%d\n",
+                 packet.type, packet.srcRepeater, packet.destRepeater, packet.nextHop, 
+                 packet.hopCount, packet.maxHops, packet.seqNum, packet.payloadLen);
+    
+    return LORA_PARSE_SUCCESS;
+}
+
+// Serialize a LoRa packet to binary data
+size_t serializeLoRaPacket(const LoRaPacket& packet, uint8_t* buffer, size_t bufferSize) {
+    // Calculate required size
+    size_t totalSize = LORA_HEADER_SIZE + packet.payloadLen;
+    
+    if (bufferSize < totalSize) {
+        Serial.printf("LoRa Parser: Buffer too small for serialization (%d needed, %d available)\n", 
+                     totalSize, bufferSize);
+        return 0;
+    }
+    
+    if (packet.payloadLen > LORA_MAX_PAYLOAD_SIZE) {
+        Serial.printf("LoRa Parser: Payload length %d exceeds maximum %d\n", packet.payloadLen, LORA_MAX_PAYLOAD_SIZE);
+        return 0;
+    }
+    
+    size_t offset = 0;
+    
+    // Serialize magic (1 byte)
+    buffer[offset++] = packet.magic;
+    
+    // Serialize version (1 byte)
+    buffer[offset++] = packet.version;
+    
+    // Serialize type (1 byte)
+    buffer[offset++] = packet.type;
+    
+    // Serialize source repeater ID (4 bytes, big-endian)
+    for (int i = 3; i >= 0; i--) {
+        buffer[offset++] = (packet.srcRepeater >> (i * 8)) & 0xFF;
+    }
+    
+    // Serialize destination repeater ID (4 bytes, big-endian)
+    for (int i = 3; i >= 0; i--) {
+        buffer[offset++] = (packet.destRepeater >> (i * 8)) & 0xFF;
+    }
+    
+    // Serialize next hop repeater ID (4 bytes, big-endian)
+    for (int i = 3; i >= 0; i--) {
+        buffer[offset++] = (packet.nextHop >> (i * 8)) & 0xFF;
+    }
+    
+    // Serialize hop count (1 byte)
+    buffer[offset++] = packet.hopCount;
+    
+    // Serialize max hops (1 byte)
+    buffer[offset++] = packet.maxHops;
+    
+    // Serialize sequence number (2 bytes, big-endian)
+    buffer[offset++] = (packet.seqNum >> 8) & 0xFF;
+    buffer[offset++] = packet.seqNum & 0xFF;
+    
+    // Serialize payload length (1 byte)
+    buffer[offset++] = packet.payloadLen;
+    
+    // Serialize payload
+    if (packet.payloadLen > 0) {
+        memcpy(buffer + offset, packet.payload, packet.payloadLen);
+        offset += packet.payloadLen;
+    }
+    
+    Serial.printf("LoRa Parser: Serialized %d bytes (header=%d, payload=%d)\n", 
+                 offset, LORA_HEADER_SIZE, packet.payloadLen);
+    
+    return offset;
+}
+
+// Generate repeater ID from MAC address
+uint32_t getRepeaterID() {
+    // Get MAC address from ESP32
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    
+    // Create 32-bit ID from MAC address (use last 4 bytes)
+    uint32_t id = 0;
+    for (int i = 2; i < 6; i++) {  // Skip first 2 bytes to get unique part
+        id = (id << 8) | mac[i];
+    }
+    
+    Serial.printf("Repeater ID: %08X (from MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
+                 id, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    
+    return id;
 }

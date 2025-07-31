@@ -82,7 +82,70 @@ enum ParseResult {
     PARSE_INCOMPLETE = 4
 };
 
+// LoRa Mesh Packet Format (for repeater-to-repeater communication)
+#define LORA_MAGIC                  0xBC
+#define LORA_VERSION                0x01
+#define LORA_MAX_PAYLOAD_SIZE       220
+#define LORA_HEADER_SIZE            20  // Fixed header size without payload
+
+// LoRa Mesh Packet Types
+#define LORA_PKT_NEIGHBOR_ANNOUNCE  0x01  // Neighbor discovery
+#define LORA_PKT_ROUTE_REQUEST      0x02  // Route discovery request
+#define LORA_PKT_ROUTE_REPLY        0x03  // Route discovery reply
+#define LORA_PKT_DATA               0x04  // Data packet (contains BitChat packet)
+#define LORA_PKT_MESH_ACK           0x05  // Mesh acknowledgment
+
+// Special destination values
+#define LORA_DEST_BROADCAST         0xFFFFFFFF
+
+// Default mesh parameters
+#define LORA_DEFAULT_MAX_HOPS       5
+#define LORA_MAX_HOPS_LIMIT         10
+
+// LoRa packet structure for mesh communication
+struct LoRaPacket {
+    // Basic header
+    uint8_t magic;              // 0xBC - packet magic number
+    uint8_t version;            // 0x01 - packet format version
+    uint8_t type;               // Mesh packet type (LORA_PKT_*)
+    
+    // Mesh routing info
+    uint32_t srcRepeater;       // Original repeater ID (source)
+    uint32_t destRepeater;      // Target repeater ID (0xFFFFFFFF = broadcast)
+    uint32_t nextHop;           // Next hop repeater ID
+    uint8_t hopCount;           // Number of hops traveled
+    uint8_t maxHops;            // Maximum hops allowed (TTL for mesh)
+    uint16_t seqNum;            // Sequence number for deduplication
+    
+    // Payload
+    uint8_t payloadLen;         // Length of BitChat packet payload
+    uint8_t payload[LORA_MAX_PAYLOAD_SIZE]; // BitChat packet data
+    
+    // Constructor
+    LoRaPacket() : magic(LORA_MAGIC), version(LORA_VERSION), type(0),
+                   srcRepeater(0), destRepeater(LORA_DEST_BROADCAST), nextHop(0),
+                   hopCount(0), maxHops(LORA_DEFAULT_MAX_HOPS), seqNum(0), payloadLen(0) {
+        memset(payload, 0, LORA_MAX_PAYLOAD_SIZE);
+    }
+};
+
+// LoRa packet parsing results
+enum LoRaParseResult {
+    LORA_PARSE_SUCCESS = 0,
+    LORA_PARSE_TOO_SMALL = 1,
+    LORA_PARSE_INVALID_MAGIC = 2,
+    LORA_PARSE_INVALID_VERSION = 3,
+    LORA_PARSE_UNSUPPORTED_TYPE = 4,
+    LORA_PARSE_PAYLOAD_TOO_LARGE = 5
+};
+
 // Function declarations for packet handling
 ParseResult parsePacket(const uint8_t* data, size_t length, BitchatPacket& packet);
 size_t serializePacket(const BitchatPacket& packet, uint8_t* buffer, size_t bufferSize);
 bool isSupportedMessageType(uint8_t type);
+
+// LoRa packet handling functions
+LoRaParseResult parseLoRaPacket(const uint8_t* data, size_t length, LoRaPacket& packet);
+size_t serializeLoRaPacket(const LoRaPacket& packet, uint8_t* buffer, size_t bufferSize);
+bool isSupportedLoRaPacketType(uint8_t type);
+uint32_t getRepeaterID();  // Generate repeater ID from MAC address
