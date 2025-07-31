@@ -8,6 +8,7 @@
 #include "connection_manager.h"
 #include "message_priority_manager.h"
 #include "power_manager.h"
+#include "status_reporter.h"
 
 // Test function to verify LoRa packet format works correctly
 void testLoRaPacketFormat() {
@@ -729,6 +730,7 @@ void setup() {
     MessageRouter::init();  // Initialize message router first
     BLEMesh::init();
     LoRaBridge::init();     // Initialize LoRa radio
+    StatusReporter::init(); // Initialize status reporting
     
     // Test transmission system after initialization
     testTransmissionSystem();
@@ -761,6 +763,7 @@ void loop() {
     BLEMesh::process();
     LoRaBridge::process();     // Process LoRa radio
     MessageRouter::process();  // Process deduplication cleanup
+    StatusReporter::process(); // Process status reporting
     
     delay(10);  // Small delay to prevent watchdog reset
 }
