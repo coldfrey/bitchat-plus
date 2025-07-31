@@ -81,6 +81,51 @@ void testLoRaPacketFormat() {
     Serial.println();
 }
 
+// Test function to verify neighbor discovery functionality
+void testNeighborDiscovery() {
+    Serial.println("=== Testing Neighbor Discovery ===");
+    
+    // Test neighbor table functionality
+    Serial.println("Testing NeighborTable operations...");
+    
+    // Add a test neighbor
+    NeighborTable::addOrUpdateNeighbor(0x12345678, "TestRepeater", 2, 5, 
+                                      NEIGHBOR_CAP_ALWAYS_ON, 1, -75);
+    
+    // Add another test neighbor
+    NeighborTable::addOrUpdateNeighbor(0xABCDEF00, "TestRepeater2", 1, 2, 
+                                      NEIGHBOR_CAP_BATTERY_POWERED, 1, -85);
+    
+    // Update the first neighbor with new RSSI
+    NeighborTable::addOrUpdateNeighbor(0x12345678, "TestRepeater", 3, 7, 
+                                      NEIGHBOR_CAP_ALWAYS_ON, 1, -80);
+    
+    // Print the neighbor table
+    NeighborTable::printNeighborTable();
+    
+    // Test neighbor lookup
+    NeighborEntry* neighbor = NeighborTable::getNeighbor(0x12345678);
+    if (neighbor) {
+        Serial.printf("Found neighbor: %s (Quality: %d%%)\n", 
+                     neighbor->name.c_str(), neighbor->linkQuality);
+    } else {
+        Serial.println("ERROR: Failed to find test neighbor");
+    }
+    
+    // Test neighbor count
+    Serial.printf("Neighbor count: %d\n", NeighborTable::getNeighborCount());
+    
+    // Clean up test neighbors
+    NeighborTable::removeNeighbor(0x12345678);
+    NeighborTable::removeNeighbor(0xABCDEF00);
+    
+    Serial.printf("After cleanup, neighbor count: %d\n", NeighborTable::getNeighborCount());
+    
+    Serial.println("SUCCESS: Neighbor discovery test completed!");
+    Serial.println("=== End Neighbor Discovery Test ===");
+    Serial.println();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -89,6 +134,9 @@ void setup() {
     
     // Test LoRa packet format
     testLoRaPacketFormat();
+    
+    // Test neighbor discovery
+    testNeighborDiscovery();
     
     // Initialize LED
     pinMode(LED_PIN, OUTPUT);
