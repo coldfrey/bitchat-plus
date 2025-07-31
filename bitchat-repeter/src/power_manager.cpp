@@ -1,6 +1,6 @@
 #include "power_manager.h"
 #include "hardware_config.h"
-#include "ble_mesh.h"
+#include "ble_gateway.h"
 #include "lora_bridge.h"
 #include <esp_sleep.h>
 #include <esp_adc_cal.h>
@@ -189,7 +189,7 @@ uint32_t PowerManager::getBLEAdvertisingInterval() {
 void PowerManager::updateBLEAdvertising() {
     uint32_t interval = getBLEAdvertisingInterval();
     Serial.printf("PowerManager: Updating BLE advertising interval to %dms\n", interval);
-    BLEMesh::setAdvertisingInterval(interval);
+    BLEGateway::setAdvertisingInterval(interval);
 }
 
 int8_t PowerManager::getOptimalTxPower(int16_t neighborRSSI) {

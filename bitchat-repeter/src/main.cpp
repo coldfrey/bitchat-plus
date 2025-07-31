@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include "hardware_config.h"
-#include "ble_mesh.h"
+#include "ble_gateway.h"
 #include "lora_bridge.h"
 #include "message_router.h"
 #include "config_manager.h"
@@ -730,7 +730,7 @@ void setup() {
     ConfigManager::init();  // Initialize configuration first
     PowerManager::init();   // Initialize power management first
     MessageRouter::init();  // Initialize message router first
-    BLEMesh::init();
+    BLEGateway::init();
     LoRaBridge::init();         // Initialize LoRa radio
     StatusReporter::init();     // Initialize status reporting
     SerialDebug::init();        // Initialize debug interface
@@ -764,7 +764,7 @@ void setup() {
 void loop() {
     // Main loop processing
     PowerManager::process();   // Process power management first
-    BLEMesh::process();
+    BLEGateway::process();
     LoRaBridge::process();     // Process LoRa radio
     MessageRouter::process();       // Process deduplication cleanup
     StatusReporter::process();      // Process status reporting

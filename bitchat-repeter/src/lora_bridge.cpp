@@ -1111,10 +1111,26 @@ bool LoRaBridge::routeDataPacket(const LoRaPacket& packet) {
         // Extract BitChat packet and forward to BLE or process locally
         Serial.printf("LoRa Bridge: Received data packet for us (dest=%08X)\n", packet.destRepeater);
         
-        // TODO: Forward BitChat packet payload to MessageRouter for BLE transmission
-        // For now, just log the reception
-        Serial.printf("LoRa Bridge: Data packet payload (%d bytes) - forwarding not yet implemented\n", 
-                     packet.payloadLen);
+        // Extract embedded BitChat packet from LoRa data packet payload
+        if (packet.payloadLen > 0 && packet.payload != nullptr) {
+            BitchatPacket bitchatPacket;
+            ParseResult parseResult = parsePacket(packet.payload, packet.payloadLen, bitchatPacket);
+            
+            if (parseResult == PARSE_SUCCESS) {
+                Serial.printf("LoRa Bridge: Successfully extracted BitChat packet (type=0x%02X, TTL=%d)\n", 
+                             bitchatPacket.type, bitchatPacket.ttl);
+                
+                // Forward to MessageRouter for BLE transmission to connected iOS devices
+                MessageRouter::forwardToBLE(bitchatPacket);
+                
+                Serial.printf("LoRa Bridge: BitChat packet forwarded to BLE mesh (%d bytes)\n", 
+                             packet.payloadLen);
+            } else {
+                Serial.printf("LoRa Bridge: Failed to parse embedded BitChat packet, error=%d\n", parseResult);
+            }
+        } else {
+            Serial.println("LoRa Bridge: LoRa data packet has no payload to extract");
+        }
         return true;
     }
     

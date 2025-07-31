@@ -1,5 +1,5 @@
 #include "serial_debug.h"
-#include "ble_mesh.h"
+#include "ble_gateway.h"
 #include "lora_bridge.h"
 #include "message_router.h"
 #include "config_manager.h"
@@ -183,7 +183,7 @@ void SerialDebug::showStatus() {
     
     // Basic system info
     Serial.printf("Device Name:     %s\n", ConfigManager::getDeviceName().c_str());
-    Serial.printf("Peer ID:         %s\n", BLEMesh::getPeerID().c_str());
+    Serial.printf("Gateway ID:      %s\n", BLEGateway::getGatewayID().c_str());
     Serial.printf("Firmware:        %s\n", StatusReporter::getFirmwareVersion().c_str());
     Serial.printf("Uptime:          %s\n", formatUptime(StatusReporter::getUptimeSeconds()).c_str());
     
@@ -192,7 +192,7 @@ void SerialDebug::showStatus() {
     Serial.printf("Heap Size:       %s\n", formatBytes(ESP.getHeapSize()).c_str());
     
     // Connection status
-    Serial.printf("BLE Clients:     %d\n", BLEMesh::getConnectedClientCount());
+    Serial.printf("iOS Devices:     %d\n", BLEGateway::getConnectedDeviceCount());
     Serial.printf("Mesh Neighbors:  %d\n", NeighborTable::getNeighborCount());
     Serial.printf("Active Routes:   %d\n", RouteTable::getRouteCount());
     
@@ -230,7 +230,7 @@ void SerialDebug::showStats() {
     // Connection statistics
     Serial.printf("Healthy BLE Conns: %d/%d\n", 
                  ConnectionManager::getHealthyConnectionCount(),
-                 BLEMesh::getConnectedClientCount());
+                 BLEGateway::getConnectedDeviceCount());
     
     // Queue statistics
     MessagePriorityManager::printQueueStats();
@@ -287,7 +287,7 @@ void SerialDebug::traceRoute(uint32_t repeaterId) {
     if (route) {
         Serial.printf("Route to %08X:\n", repeaterId);
         Serial.printf("  1. %s -> %08X (%d hops total)\n", 
-                     BLEMesh::getPeerID().c_str(), route->nextHop, route->hopCount);
+                     BLEGateway::getGatewayID().c_str(), route->nextHop, route->hopCount);
         Serial.println("  ... (intermediate hops not tracked)");
         Serial.printf("  %d. %08X (destination)\n", route->hopCount + 1, repeaterId);
         
@@ -375,7 +375,7 @@ void SerialDebug::showBLEStats() {
     Serial.println("BLE CONNECTION STATISTICS");
     printSeparator();
     
-    Serial.printf("Connected Clients: %d\n", BLEMesh::getConnectedClientCount());
+    Serial.printf("Connected iOS Devices: %d\n", BLEGateway::getConnectedDeviceCount());
     Serial.printf("Healthy Connections: %d\n", ConnectionManager::getHealthyConnectionCount());
     Serial.printf("Best Connection Score: %d%%\n", ConnectionManager::getBestConnectionScore());
     

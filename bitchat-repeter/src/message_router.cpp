@@ -1,6 +1,6 @@
 #include "message_router.h"
 #include "lora_bridge.h"
-#include "ble_mesh.h"
+#include "ble_gateway.h"
 #include "message_priority_manager.h"
 #include "loop_prevention_test.h"
 #include <Arduino.h>
@@ -371,12 +371,12 @@ void MessageRouter::forwardToBLE(const BitchatPacket& packet) {
     }
     
     // Send to all connected BLE devices
-    if (BLEMesh::getConnectedClientCount() > 0) {
-        BLEMesh::sendData(buffer, packetSize);
-        Serial.printf("Message Router: Forwarded LoRa message to %d connected BLE device(s)\n", 
-                     BLEMesh::getConnectedClientCount());
+    if (BLEGateway::getConnectedDeviceCount() > 0) {
+        BLEGateway::sendToiOSDevices(buffer, packetSize);
+        Serial.printf("Message Router: Forwarded LoRa message to %d connected iOS device(s)\n", 
+                     BLEGateway::getConnectedDeviceCount());
     } else {
-        Serial.println("Message Router: No BLE devices connected - message not forwarded");
+        Serial.println("Message Router: No iOS devices connected - message not forwarded");
     }
 }
 

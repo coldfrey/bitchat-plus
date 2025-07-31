@@ -1,6 +1,6 @@
 #include "loop_prevention_test.h"
 #include "message_router.h"
-#include "ble_mesh.h"
+#include "ble_gateway.h"
 #include "lora_bridge.h"
 #include <Arduino.h>
 
@@ -285,10 +285,10 @@ BitchatPacket LoopPreventionTest::createTestPacket(uint32_t messageId, uint8_t t
     packet.timestamp = millis();
     
     // Set sender ID to our peer ID
-    String peerID = BLEMesh::getPeerID();
+    String gatewayID = BLEGateway::getGatewayID();
     memset(packet.senderID, 0, 8);
-    for (int i = 0; i < min(8, (int)peerID.length() / 2); i++) {
-        String byteStr = peerID.substring(i * 2, i * 2 + 2);
+    for (int i = 0; i < min(8, (int)gatewayID.length() / 2); i++) {
+        String byteStr = gatewayID.substring(i * 2, i * 2 + 2);
         packet.senderID[i] = (uint8_t)strtol(byteStr.c_str(), NULL, 16);
     }
     

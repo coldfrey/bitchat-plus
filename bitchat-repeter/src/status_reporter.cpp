@@ -1,5 +1,5 @@
 #include "status_reporter.h"
-#include "ble_mesh.h"
+#include "ble_gateway.h"
 #include "lora_bridge.h"
 #include "message_router.h"
 #include "config_manager.h"
@@ -46,7 +46,7 @@ void StatusReporter::sendStatusUpdate() {
     Serial.printf("Status Reporter: Status update sent (uptime: %lu seconds, "
                  "BLE clients: %d, mesh neighbors: %d)\n",
                  getUptimeSeconds(), 
-                 BLEMesh::getConnectedClientCount(),
+                 BLEGateway::getConnectedDeviceCount(),
                  NeighborTable::getNeighborCount());
 }
 
@@ -67,12 +67,12 @@ BitchatPacket StatusReporter::createStatusPacket() {
     packet.type = MSG_TYPE_ANNOUNCE;
     
     // Set sender ID to our peer ID (convert from hex string to bytes)
-    String peerID = BLEMesh::getPeerID();
+    String gatewayID = BLEGateway::getGatewayID();
     memset(packet.senderID, 0, 8);
     
     // Convert hex string peer ID to bytes
-    for (int i = 0; i < min(8, (int)peerID.length() / 2); i++) {
-        String byteStr = peerID.substring(i * 2, i * 2 + 2);
+    for (int i = 0; i < min(8, (int)gatewayID.length() / 2); i++) {
+        String byteStr = gatewayID.substring(i * 2, i * 2 + 2);
         packet.senderID[i] = (uint8_t)strtol(byteStr.c_str(), NULL, 16);
     }
     
@@ -98,7 +98,7 @@ BitchatPacket StatusReporter::createStatusPacket() {
 
 String StatusReporter::formatStatusMessage() {
     // Get current status information
-    int bleConnections = BLEMesh::getConnectedClientCount();
+    int iOSConnections = BLEGateway::getConnectedDeviceCount();
     size_t meshNeighbors = NeighborTable::getNeighborCount();
     int loraRSSI = LoRaBridge::getLastRSSI();
     String deviceName = ConfigManager::getDeviceName();
@@ -109,7 +109,7 @@ String StatusReporter::formatStatusMessage() {
     status += " | ";
     status += "FW:" + FIRMWARE_VERSION;
     status += " | ";
-    status += "BLE:" + String(bleConnections);
+    status += "iOS:" + String(iOSConnections);
     status += " | ";
     status += "Mesh:" + String(meshNeighbors);
     
