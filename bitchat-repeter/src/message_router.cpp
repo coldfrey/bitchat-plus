@@ -1,4 +1,6 @@
 #include "message_router.h"
+#include "lora_bridge.h"
+#include "ble_mesh.h"
 #include <Arduino.h>
 
 // Static member definitions
@@ -314,12 +316,26 @@ void MessageRouter::processLoRaQueue() {
             Serial.printf("Message Router: Transmitting queued LoRa message (type: 0x%02X, TTL: %d)\n",
                          it->packet.type, it->packet.ttl);
             
-            // TODO: Actually transmit via LoRa
-            // LoRaBridge::transmit(it->packet);
-            Serial.printf("Message Router: [TODO] LoRa transmission would happen here\n");
+            // Transmit via LoRa bridge
+            bool success = LoRaBridge::transmit(it->packet);
             
-            // Remove from queue after successful transmission
-            it = loraQueue.erase(it);
+            if (success) {
+                // Remove from queue after successful transmission
+                it = loraQueue.erase(it);
+            } else {
+                // Increment retry count and reschedule
+                it->retryCount++;
+                if (it->retryCount >= 3) {
+                    Serial.printf("Message Router: Dropping message after %d failed attempts\n", it->retryCount);
+                    it = loraQueue.erase(it);
+                } else {
+                    // Retry with exponential backoff
+                    it->scheduleTime = now + (100 << it->retryCount); // 100ms, 200ms, 400ms
+                    Serial.printf("Message Router: Rescheduling transmission (attempt %d) in %dms\n", 
+                                 it->retryCount + 1, (100 << it->retryCount));
+                    ++it;
+                }
+            }
         } else {
             ++it;
         }
@@ -329,9 +345,23 @@ void MessageRouter::processLoRaQueue() {
 void MessageRouter::forwardToBLE(const BitchatPacket& packet) {
     Serial.printf("Message Router: Forwarding LoRa message to BLE devices (type: 0x%02X)\n", packet.type);
     
-    // TODO: Send to all connected BLE devices
-    // BLEMesh::sendToAllConnections(packet);
-    Serial.printf("Message Router: [TODO] BLE forwarding would happen here\n");
+    // Serialize packet for BLE transmission
+    uint8_t buffer[256];
+    size_t packetSize = serializePacket(packet, buffer, sizeof(buffer));
+    
+    if (packetSize == 0) {
+        Serial.println("Message Router: Failed to serialize packet for BLE forwarding");
+        return;
+    }
+    
+    // Send to all connected BLE devices
+    if (BLEMesh::getConnectedClientCount() > 0) {
+        BLEMesh::sendData(buffer, packetSize);
+        Serial.printf("Message Router: Forwarded LoRa message to %d connected BLE device(s)\n", 
+                     BLEMesh::getConnectedClientCount());
+    } else {
+        Serial.println("Message Router: No BLE devices connected - message not forwarded");
+    }
 }
 
 // Helper functions

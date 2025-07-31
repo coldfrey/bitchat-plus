@@ -26,7 +26,7 @@ void setup() {
     // ConfigManager::init();
     MessageRouter::init();  // Initialize message router first
     BLEMesh::init();
-    // LoRaBridge::init();
+    LoRaBridge::init();     // Initialize LoRa radio
     
     digitalWrite(LED_PIN, LOW);  // Turn off LED after startup
     Serial.println("BitChat Repeater ready");
@@ -35,7 +35,7 @@ void setup() {
 void loop() {
     // Main loop processing
     BLEMesh::process();
-    // LoRaBridge::process();
+    LoRaBridge::process();     // Process LoRa radio
     MessageRouter::process();  // Process deduplication cleanup
     
     delay(10);  // Small delay to prevent watchdog reset
