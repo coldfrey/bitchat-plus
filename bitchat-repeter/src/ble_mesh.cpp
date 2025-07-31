@@ -1,4 +1,5 @@
 #include "ble_mesh.h"
+#include "message_router.h"
 #include <Arduino.h>
 #include <WiFi.h>
 
@@ -162,7 +163,10 @@ void BLEMesh::handleReceivedData(const uint8_t* data, size_t length, uint16_t co
     Serial.printf("BLE Mesh: Parsed packet - Type=0x%02X, From=%s, TTL=%d\n", 
                  packet.type, senderHex, packet.ttl);
     
-    // Handle specific message types
+    // Forward to message router for deduplication and routing
+    MessageRouter::handleBLEMessage(packet, connectionHandle);
+    
+    // Handle specific message types locally for logging/processing
     switch (packet.type) {
         case MSG_TYPE_ANNOUNCE:
             handleAnnounceMessage(packet, connectionHandle);
