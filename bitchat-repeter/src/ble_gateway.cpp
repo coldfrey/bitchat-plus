@@ -13,23 +13,31 @@ String BLEGateway::gatewayID = "";
 std::map<uint16_t, iOSConnectionState> BLEGateway::connectionStates;
 
 void BLEGateway::init() {
-    Serial.println("BLE Gateway: Initializing BLE server for iOS devices...");
+    Serial.println("[BLE] Initializing BLE server for iOS devices...");
     
     // Generate unique gateway ID from MAC address
     generateGatewayID();
+    Serial.printf("[BLE] Generated Gateway ID: %s\n", gatewayID.c_str());
     
-    // Initialize NimBLE
-    NimBLEDevice::init("BitChat-Gateway");
+    // Initialize NimBLE with descriptive name
+    String deviceName = "BitChat-" + gatewayID;
+    Serial.printf("[BLE] Initializing NimBLE with device name: %s\n", deviceName.c_str());
+    NimBLEDevice::init(deviceName.c_str());
     NimBLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power for better range
+    Serial.println("[BLE] Set transmission power to maximum (ESP_PWR_LVL_P9)");
     
     // Create BLE Server
+    Serial.println("[BLE] Creating BLE server...");
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
+    Serial.println("[BLE] BLE server created with callbacks");
     
     // Create BitChat service
+    Serial.printf("[BLE] Creating BitChat service with UUID: %s\n", BITCHAT_SERVICE_UUID);
     pService = pServer->createService(BITCHAT_SERVICE_UUID);
     
     // Create characteristic with read, write, and notify properties
+    Serial.printf("[BLE] Creating BitChat characteristic with UUID: %s\n", BITCHAT_CHAR_UUID);
     pCharacteristic = pService->createCharacteristic(
         BITCHAT_CHAR_UUID,
         NIMBLE_PROPERTY::READ | 
@@ -39,18 +47,26 @@ void BLEGateway::init() {
     );
     
     pCharacteristic->setCallbacks(new CharacteristicCallbacks());
+    Serial.println("[BLE] Characteristic created with R/W/N properties and callbacks");
     
     // Start the service
     pService->start();
+    Serial.println("[BLE] BitChat service started");
     
     // Start advertising to iOS devices
+    Serial.println("[BLE] Starting advertising...");
     startAdvertising();
     
     // Initialize connection manager
+    Serial.println("[BLE] Initializing connection manager...");
     ConnectionManager::init();
     
-    Serial.printf("BLE Gateway: Ready with ID: %s\n", gatewayID.c_str());
-    Serial.printf("BLE Gateway: Advertising BitChat service: %s\n", BITCHAT_SERVICE_UUID);
+    Serial.println("[BLE] *** BLE Gateway Initialization Complete ***");
+    Serial.printf("[BLE] Gateway ID: %s\n", gatewayID.c_str());
+    Serial.printf("[BLE] Service UUID: %s\n", BITCHAT_SERVICE_UUID);
+    Serial.printf("[BLE] Characteristic UUID: %s\n", BITCHAT_CHAR_UUID);
+    Serial.printf("[BLE] Device Name: BitChat-%s\n", gatewayID.c_str());
+    Serial.println("[BLE] Ready to accept iOS device connections!");
 }
 
 void BLEGateway::process() {
@@ -59,30 +75,50 @@ void BLEGateway::process() {
     
     // NimBLE handles most processing automatically
     static unsigned long lastUpdate = 0;
+    static unsigned long lastAdvertisingCheck = 0;
     unsigned long now = millis();
     
-    if (now - lastUpdate > 10000) { // Every 10 seconds
-        lastUpdate = now;
+    // Check advertising status more frequently
+    if (now - lastAdvertisingCheck > 5000) { // Every 5 seconds
+        lastAdvertisingCheck = now;
         
-        // Restart advertising if no devices connected
         if (!pServer->getConnectedCount() && !pAdvertising->isAdvertising()) {
-            Serial.println("BLE Gateway: Restarting advertising");
+            Serial.println("[BLE-ADV] No devices connected and advertising stopped - restarting...");
+            startAdvertising();
+        } else if (!pAdvertising->isAdvertising()) {
+            Serial.println("[BLE-ADV] Advertising stopped unexpectedly - restarting...");
             startAdvertising();
         }
+    }
+    
+    if (now - lastUpdate > 15000) { // Every 15 seconds
+        lastUpdate = now;
         
-        Serial.printf("BLE Gateway: Connected iOS devices: %d (healthy: %d)\n", 
-                     pServer->getConnectedCount(), ConnectionManager::getHealthyConnectionCount());
+        int connectedCount = pServer->getConnectedCount();
+        int healthyCount = ConnectionManager::getHealthyConnectionCount();
+        
+        Serial.println("[BLE-STATUS] === BLE Gateway Status ===");
+        Serial.printf("[BLE-STATUS] Connected devices: %d\n", connectedCount);
+        Serial.printf("[BLE-STATUS] Healthy connections: %d\n", healthyCount);
+        Serial.printf("[BLE-STATUS] Advertising active: %s\n", pAdvertising->isAdvertising() ? "Yes" : "No");
+        Serial.printf("[BLE-STATUS] Server running: %s\n", pServer ? "Yes" : "No");
         
         // Update connection RSSI (simplified simulation for now)
-        if (pServer->getConnectedCount() > 0) {
+        if (connectedCount > 0) {
             int simulatedRSSI = -60 + (random(-20, 20)); // Simulate -40 to -80 dBm range
             ConnectionManager::updateConnectionRSSI(1, simulatedRSSI);
+            Serial.printf("[BLE-STATUS] Simulated RSSI update: %d dBm\n", simulatedRSSI);
         }
         
-        // Print connection statistics
-        if (pServer->getConnectedCount() > 0) {
+        // Print detailed connection statistics
+        if (connectedCount > 0) {
+            Serial.println("[BLE-STATUS] Connection details:");
             ConnectionManager::printConnectionStats();
+        } else {
+            Serial.println("[BLE-STATUS] No active connections");
         }
+        
+        Serial.println("[BLE-STATUS] === End BLE Status ===\n");
     }
 }
 
@@ -154,55 +190,96 @@ void BLEGateway::generateGatewayID() {
 }
 
 void BLEGateway::startAdvertising() {
+    Serial.println("[BLE-ADV] Configuring advertising parameters...");
     pAdvertising = NimBLEDevice::getAdvertising();
     
     // Add service UUID to advertisement
     pAdvertising->addServiceUUID(BITCHAT_SERVICE_UUID);
+    Serial.printf("[BLE-ADV] Added service UUID: %s\n", BITCHAT_SERVICE_UUID);
     
-    // Set the gateway ID as the device name (appears in iOS scan results)
-    pAdvertising->setName(gatewayID.c_str());
+    // Set a descriptive device name (appears in iOS scan results)
+    String advertisingName = "BitChat-" + gatewayID;
+    pAdvertising->setName(advertisingName.c_str());
+    Serial.printf("[BLE-ADV] Set advertising name: %s\n", advertisingName.c_str());
     
-    // Configure advertising parameters
-    pAdvertising->setScanResponse(false);
+    // Configure advertising parameters for better discoverability
+    pAdvertising->setScanResponse(true);  // Enable scan response for more data
     pAdvertising->setMinPreferred(0x0);
+    
+    // Set advertising intervals (in 0.625ms units)
+    pAdvertising->setMinInterval(160);  // 100ms
+    pAdvertising->setMaxInterval(240);  // 150ms
+    Serial.println("[BLE-ADV] Set advertising interval: 100-150ms");
+    
+    // Add manufacturer data with gateway info
+    String mfgDataStr = "BC" + gatewayID.substring(0, 6);  // "BC" + first 6 chars of gateway ID
+    std::string mfgData = mfgDataStr.c_str();
+    pAdvertising->setManufacturerData(mfgData);
+    Serial.printf("[BLE-ADV] Added manufacturer data: %s\n", mfgData.c_str());
     
     // Start advertising
     pAdvertising->start();
     
-    Serial.println("BLE Gateway: Started advertising to iOS devices");
+    Serial.println("[BLE-ADV] *** ADVERTISING STARTED ***");
+    Serial.printf("[BLE-ADV] Device Name: %s\n", advertisingName.c_str());
+    Serial.printf("[BLE-ADV] Service UUID: %s\n", BITCHAT_SERVICE_UUID);
+    Serial.println("[BLE-ADV] Device is now discoverable by iOS apps!");
 }
 
 void BLEGateway::handleReceivedData(const uint8_t* data, size_t length, uint16_t connectionHandle) {
-    Serial.printf("BLE Gateway: Received %d bytes from iOS device (connection %d)\n", length, connectionHandle);
+    Serial.println("\n[BLE-RX] *** MESSAGE RECEIVED ***");
+    Serial.printf("[BLE-RX] Connection Handle: %d\n", connectionHandle);
+    Serial.printf("[BLE-RX] Data Length: %d bytes\n", length);
+    Serial.printf("[BLE-RX] Timestamp: %lu ms\n", millis());
     
-    // Print first few bytes for debugging
-    Serial.print("BLE Gateway: Data: ");
-    for (size_t i = 0; i < min(length, (size_t)16); i++) {
+    // Print complete hex dump for debugging
+    Serial.print("[BLE-RX] Raw Data: ");
+    for (size_t i = 0; i < length; i++) {
         Serial.printf("%02X ", data[i]);
+        if ((i + 1) % 16 == 0) Serial.print("\n[BLE-RX]            ");
+    }
+    Serial.println();
+    
+    // Print as ASCII if printable
+    Serial.print("[BLE-RX] ASCII: ");
+    for (size_t i = 0; i < length; i++) {
+        if (data[i] >= 32 && data[i] <= 126) {
+            Serial.printf("%c", data[i]);
+        } else {
+            Serial.print(".");
+        }
     }
     Serial.println();
     
     // Handle version negotiation first
     if (length >= 2 && data[1] == MSG_TYPE_VERSION_HELLO) {
-        Serial.println("BLE Gateway: Received VERSION_HELLO from iOS device");
+        Serial.println("[BLE-RX] Detected VERSION_HELLO message");
         handleVersionHello(data, length, connectionHandle);
+        Serial.println("[BLE-RX] *** END MESSAGE PROCESSING ***\n");
         return;
     }
     
     // Check if connection completed version negotiation
     if (!isConnectionReady(connectionHandle)) {
-        Serial.printf("BLE Gateway: Rejecting message from iOS device %d - version negotiation not completed\n", connectionHandle);
+        Serial.printf("[BLE-RX] ❌ REJECTING MESSAGE - Version negotiation not completed for connection %d\n", connectionHandle);
+        Serial.println("[BLE-RX] *** END MESSAGE PROCESSING ***\n");
         return;
     }
+    
+    Serial.println("[BLE-RX] ✅ Connection ready, parsing BitChat packet...");
     
     // Parse the BitChat packet
     BitchatPacket packet;
     ParseResult result = parsePacket(data, length, packet);
     
     if (result != PARSE_SUCCESS) {
-        Serial.printf("BLE Gateway: Failed to parse packet from iOS device %d, error=%d\n", connectionHandle, result);
+        Serial.printf("[BLE-RX] ❌ PACKET PARSING FAILED - Connection %d, Error Code: %d\n", connectionHandle, result);
+        Serial.println("[BLE-RX] Possible causes: Malformed packet, incorrect format, or corruption");
+        Serial.println("[BLE-RX] *** END MESSAGE PROCESSING ***\n");
         return;
     }
+    
+    Serial.println("[BLE-RX] ✅ Packet parsed successfully!");
     
     // Convert sender ID to hex string for logging
     char senderHex[17];
@@ -211,8 +288,49 @@ void BLEGateway::handleReceivedData(const uint8_t* data, size_t length, uint16_t
     }
     senderHex[16] = '\0';
     
-    Serial.printf("BLE Gateway: Parsed packet from iOS - Type=0x%02X, From=%s, TTL=%d\n", 
-                 packet.type, senderHex, packet.ttl);
+    // Convert recipient ID to hex string
+    char recipientHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(recipientHex + (i * 2), "%02X", packet.recipientID[i]);
+    }
+    recipientHex[16] = '\0';
+    
+    // Determine message type string
+    const char* msgTypeStr = "UNKNOWN";
+    switch (packet.type) {
+        case MSG_TYPE_ANNOUNCE: msgTypeStr = "ANNOUNCE"; break;
+        case MSG_TYPE_LEAVE: msgTypeStr = "LEAVE"; break;
+        case MSG_TYPE_MESSAGE: msgTypeStr = "MESSAGE"; break;
+        case MSG_TYPE_DELIVERY_ACK: msgTypeStr = "DELIVERY_ACK"; break;
+        case MSG_TYPE_PROTOCOL_ACK: msgTypeStr = "PROTOCOL_ACK"; break;
+        case MSG_TYPE_VERSION_HELLO: msgTypeStr = "VERSION_HELLO"; break;
+        case MSG_TYPE_VERSION_ACK: msgTypeStr = "VERSION_ACK"; break;
+    }
+    
+    Serial.println("[BLE-RX] === PACKET DETAILS ===");
+    Serial.printf("[BLE-RX] Type: %s (0x%02X)\n", msgTypeStr, packet.type);
+    Serial.printf("[BLE-RX] From: %s\n", senderHex);
+    Serial.printf("[BLE-RX] To: %s\n", recipientHex);
+    Serial.printf("[BLE-RX] TTL: %d\n", packet.ttl);
+    Serial.printf("[BLE-RX] Timestamp: %lu\n", packet.timestamp);
+    Serial.printf("[BLE-RX] Payload Length: %d bytes\n", packet.payloadLength);
+    
+    // Print payload preview if available
+    if (packet.payload && packet.payloadLength > 0) {
+        Serial.print("[BLE-RX] Payload Preview: ");
+        size_t previewLen = (packet.payloadLength < 32) ? packet.payloadLength : 32;
+        for (size_t i = 0; i < previewLen; i++) {
+            if (packet.payload[i] >= 32 && packet.payload[i] <= 126) {
+                Serial.printf("%c", packet.payload[i]);
+            } else {
+                Serial.print(".");
+            }
+        }
+        if (packet.payloadLength > 32) Serial.print("...");
+        Serial.println();
+    }
+    
+    Serial.println("[BLE-RX] Forwarding to message router for LoRa mesh relay...");
     
     // Forward to message router for LoRa mesh relay
     MessageRouter::handleBLEMessage(packet, connectionHandle);
@@ -237,23 +355,29 @@ void BLEGateway::handleReceivedData(const uint8_t* data, size_t length, uint16_t
             break;
             
         default:
-            Serial.printf("BLE Gateway: Message type 0x%02X forwarded to LoRa mesh\n", packet.type);
+            Serial.printf("[BLE-RX] Unknown message type 0x%02X forwarded to LoRa mesh\n", packet.type);
             break;
     }
+    
+    Serial.println("[BLE-RX] *** END MESSAGE PROCESSING ***\n");
 }
 
 // Server callback implementations
 void ServerCallbacks::onConnect(NimBLEServer* pServer) {
-    Serial.printf("BLE Gateway: iOS device connected (total: %d)\n", pServer->getConnectedCount());
+    int totalConnected = pServer->getConnectedCount();
+    
+    Serial.println("[BLE-CONN] === NEW DEVICE CONNECTED ===");
+    Serial.printf("[BLE-CONN] Total connected devices: %d\n", totalConnected);
     
     // Simple connection handle mapping for now
-    uint16_t connectionHandle = pServer->getConnectedCount();
+    uint16_t connectionHandle = totalConnected;
     
     // Generate temporary device ID until VERSION_HELLO provides real one
     String tempDeviceID = "iOS-Device-" + String(connectionHandle);
     
     // Add to connection manager
     ConnectionManager::addConnection(connectionHandle, tempDeviceID);
+    Serial.printf("[BLE-CONN] Added to connection manager with ID: %s\n", tempDeviceID.c_str());
     
     // Initialize connection state
     iOSConnectionState state;
@@ -261,20 +385,35 @@ void ServerCallbacks::onConnect(NimBLEServer* pServer) {
     state.connectTime = millis();
     BLEGateway::setConnectionState(connectionHandle, state);
     
+    Serial.printf("[BLE-CONN] Connection handle: %d\n", connectionHandle);
+    Serial.printf("[BLE-CONN] Connection time: %lu ms\n", millis());
+    Serial.println("[BLE-CONN] Waiting for VERSION_HELLO from device...");
+    
     // Keep advertising for multiple device connections
+    Serial.println("[BLE-CONN] Keeping advertising active for additional connections");
+    Serial.println("[BLE-CONN] === Connection Complete ===");
 }
 
 void ServerCallbacks::onDisconnect(NimBLEServer* pServer) {
-    Serial.printf("BLE Gateway: iOS device disconnected (remaining: %d)\n", pServer->getConnectedCount());
+    int remainingConnected = pServer->getConnectedCount();
+    
+    Serial.println("[BLE-DISC] === DEVICE DISCONNECTED ===");
+    Serial.printf("[BLE-DISC] Remaining connected devices: %d\n", remainingConnected);
     
     // ConnectionManager will handle stale connection cleanup automatically
+    Serial.println("[BLE-DISC] Connection manager will clean up stale connections");
     
     // Restart advertising if no clients connected
-    if (pServer->getConnectedCount() == 0) {
+    if (remainingConnected == 0) {
+        Serial.println("[BLE-DISC] No devices remaining - restarting advertising...");
         delay(500); // Brief delay
         pServer->startAdvertising();
-        Serial.println("BLE Gateway: Restarted advertising after disconnect");
+        Serial.println("[BLE-DISC] Advertising restarted - ready for new connections");
+    } else {
+        Serial.printf("[BLE-DISC] %d device(s) still connected\n", remainingConnected);
     }
+    
+    Serial.println("[BLE-DISC] === Disconnect Complete ===");
 }
 
 // Characteristic callback implementations
@@ -282,13 +421,18 @@ void CharacteristicCallbacks::onWrite(NimBLECharacteristic* pCharacteristic) {
     std::string value = pCharacteristic->getValue();
     
     if (value.length() > 0) {
+        Serial.printf("[BLE-RX] Received %d bytes from iOS device\n", value.length());
+        
         // Simplified connection handle mapping
         uint16_t connectionHandle = 1; // TODO: Improve connection handle tracking
         
         // Update connection activity
         ConnectionManager::updateConnectionActivity(connectionHandle, true);
+        Serial.printf("[BLE-RX] Updated connection activity for handle %d\n", connectionHandle);
         
         BLEGateway::handleReceivedData((const uint8_t*)value.data(), value.length(), connectionHandle);
+    } else {
+        Serial.println("[BLE-RX] Received empty data - ignoring");
     }
 }
 

@@ -52,6 +52,7 @@ void MessageCache::addMessage(uint32_t messageId, unsigned long timestamp) {
     MessageCacheEntry& oldEntry = entries[currentIndex];
     if (oldEntry.messageId != 0) {
         idToIndex.erase(oldEntry.messageId);
+        Serial.printf("[CACHE] Evicted old message ID 0x%08X to make room\n", oldEntry.messageId);
     }
     
     // Add new entry
@@ -62,8 +63,8 @@ void MessageCache::addMessage(uint32_t messageId, unsigned long timestamp) {
     currentIndex = (currentIndex + 1) % CACHE_SIZE;
     totalEntries++;
     
-    Serial.printf("Message Cache: Added message ID 0x%08X (cache size: %d)\n", 
-                 messageId, getSize());
+    Serial.printf("[CACHE] Added message ID 0x%08X (cache size: %d/%d)\n", 
+                 messageId, getSize(), 1000);
 }
 
 void MessageCache::cleanupExpired() {
@@ -87,14 +88,17 @@ void MessageCache::cleanupExpired() {
 
 // MessageRouter implementation
 void MessageRouter::init() {
-    Serial.println("Message Router: Initializing...");
+    Serial.println("[MSG-ROUTER] Initializing message routing system...");
     lastCleanup = millis();
     
     // Initialize message priority manager
+    Serial.println("[MSG-ROUTER] Starting message priority manager...");
     MessagePriorityManager::init();
     
-    Serial.printf("Message Router: Deduplication cache initialized (capacity: %d messages)\n", 1000);
-    Serial.println("Message Router: Priority-based queuing enabled");
+    Serial.printf("[MSG-ROUTER] Deduplication cache initialized (capacity: %d messages)\n", 1000);
+    Serial.println("[MSG-ROUTER] Priority-based queuing enabled");
+    Serial.printf("[MSG-ROUTER] Cache expiry time: %lu ms\n", 300000UL);
+    Serial.println("[MSG-ROUTER] Message routing system ready");
 }
 
 void MessageRouter::process() {
@@ -164,134 +168,209 @@ void MessageRouter::recordMessage(const BitchatPacket& packet) {
 }
 
 void MessageRouter::handleBLEMessage(const BitchatPacket& packet, uint16_t connectionHandle) {
+    Serial.println("\n[MSG-ROUTER] *** ROUTING BLE MESSAGE ***");
+    Serial.printf("[MSG-ROUTER] Source: BLE Connection %d\n", connectionHandle);
+    Serial.printf("[MSG-ROUTER] Destination: LoRa Mesh Network\n");
+    Serial.printf("[MSG-ROUTER] Timestamp: %lu ms\n", millis());
+    
+    // Convert sender ID to hex string for logging
+    char senderHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+    }
+    senderHex[16] = '\0';
+    
+    Serial.printf("[MSG-ROUTER] From Device: %s\n", senderHex);
+    
     // Comprehensive input validation to prevent buffer overflows and network attacks
+    Serial.println("[MSG-ROUTER] Performing packet validation...");
+    
     if (packet.payloadLength > MAX_PAYLOAD_SIZE) {
-        Serial.printf("Message Router: BLE packet payload too large (%d > %d) - dropping\n", 
+        Serial.printf("[MSG-ROUTER] ❌ DROPPING - Payload too large (%d > %d bytes)\n", 
                      packet.payloadLength, MAX_PAYLOAD_SIZE);
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
     if (packet.payload == nullptr && packet.payloadLength > 0) {
-        Serial.println("Message Router: BLE packet has null payload but non-zero length - dropping");
+        Serial.println("[MSG-ROUTER] ❌ DROPPING - Null payload with non-zero length");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
+    Serial.println("[MSG-ROUTER] ✅ Packet validation passed");
+    
     if (packet.ttl == 0) {
-        Serial.println("Message Router: BLE packet has TTL=0 - dropping");
+        Serial.println("[MSG-ROUTER] ❌ DROPPING - TTL is 0 (expired)");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
     if (packet.ttl > MAX_TTL) {
-        Serial.printf("Message Router: BLE packet TTL too high (%d > %d) - clamping\n", 
-                     packet.ttl, MAX_TTL);
-        // Note: We'll clamp this in decrementTTL function
+        Serial.printf("[MSG-ROUTER] ⚠️ TTL too high (%d > %d) - will clamp to %d\n", 
+                     packet.ttl, MAX_TTL, MAX_TTL);
     }
     
-    Serial.printf("Message Router: Processing BLE message type 0x%02X from connection %d\n", 
-                 packet.type, connectionHandle);
+    Serial.printf("[MSG-ROUTER] TTL: %d (will become %d after routing)\n", packet.ttl, packet.ttl - 1);
     
     // Handle loop prevention test messages
+    Serial.println("[MSG-ROUTER] Checking for loop prevention test messages...");
     LoopPreventionTest::handleReceivedTestMessage(packet, "BLE-" + String(connectionHandle));
     
     // Check for duplicates
+    Serial.println("[MSG-ROUTER] Checking for duplicate messages...");
     if (isDuplicate(packet)) {
-        Serial.printf("Message Router: Dropping duplicate BLE message (ID: 0x%08X)\n", 
-                     generateMessageId(packet));
+        uint32_t msgId = generateMessageId(packet);
+        Serial.printf("[MSG-ROUTER] ❌ DROPPING - Duplicate message detected (ID: 0x%08X)\n", msgId);
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
+    
+    Serial.println("[MSG-ROUTER] ✅ No duplicate found, proceeding with routing");
     
     // Create a mutable copy for TTL processing
     BitchatPacket routingPacket = packet;
     
+    Serial.println("[MSG-ROUTER] Processing TTL for routing...");
     // Decrement TTL and check if we should forward
     if (!decrementTTL(routingPacket)) {
-        Serial.printf("Message Router: Dropping BLE message - TTL reached 0\n");
+        Serial.printf("[MSG-ROUTER] ❌ DROPPING - TTL reached 0 after decrement\n");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
+    
+    Serial.printf("[MSG-ROUTER] TTL after decrement: %d\n", routingPacket.ttl);
     
     // Check if we should forward this message
+    Serial.println("[MSG-ROUTER] Evaluating forwarding decision...");
     if (!shouldForward(routingPacket, connectionHandle)) {
-        Serial.printf("Message Router: Not forwarding BLE message - routing decision\n");
+        Serial.printf("[MSG-ROUTER] ❌ NOT FORWARDING - Routing policy decision\n");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
+    Serial.println("[MSG-ROUTER] ✅ Forwarding approved");
+    
     // Record this message to prevent future duplicates
+    Serial.println("[MSG-ROUTER] Recording message to prevent duplicates...");
     recordMessage(packet); // Record original packet to maintain consistency
     
     // Queue for LoRa mesh transmission
+    Serial.println("[MSG-ROUTER] Queuing for LoRa transmission...");
     if (queueForLoRa(routingPacket)) {
-        Serial.printf("Message Router: BLE message queued for LoRa relay (TTL: %d)\n", routingPacket.ttl);
+        Serial.printf("[MSG-ROUTER] ✅ Successfully queued for LoRa relay (TTL: %d)\n", routingPacket.ttl);
     } else {
-        Serial.printf("Message Router: Failed to queue BLE message for LoRa (queue full)\n");
+        Serial.printf("[MSG-ROUTER] ❌ FAILED to queue for LoRa (queue full or other error)\n");
     }
+    
+    Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
 }
 
 void MessageRouter::handleLoRaMessage(const BitchatPacket& packet) {
+    Serial.println("\n[MSG-ROUTER] *** ROUTING LoRa MESSAGE ***");
+    Serial.printf("[MSG-ROUTER] Source: LoRa Mesh Network\n");
+    Serial.printf("[MSG-ROUTER] Destination: BLE Connected Devices\n");
+    Serial.printf("[MSG-ROUTER] Timestamp: %lu ms\n", millis());
+    
+    // Convert sender ID to hex string for logging
+    char senderHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+    }
+    senderHex[16] = '\0';
+    
+    Serial.printf("[MSG-ROUTER] From Device: %s\n", senderHex);
+    
     // Comprehensive input validation to prevent buffer overflows and network attacks
+    Serial.println("[MSG-ROUTER] Performing packet validation...");
     if (packet.payloadLength > MAX_PAYLOAD_SIZE) {
-        Serial.printf("Message Router: LoRa packet payload too large (%d > %d) - dropping\n", 
+        Serial.printf("[MSG-ROUTER] ❌ DROPPING - Payload too large (%d > %d bytes)\n", 
                      packet.payloadLength, MAX_PAYLOAD_SIZE);
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
     if (packet.payload == nullptr && packet.payloadLength > 0) {
-        Serial.println("Message Router: LoRa packet has null payload but non-zero length - dropping");
+        Serial.println("[MSG-ROUTER] ❌ DROPPING - Null payload with non-zero length");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
+    Serial.println("[MSG-ROUTER] ✅ Packet validation passed");
+    
     if (packet.ttl == 0) {
-        Serial.println("Message Router: LoRa packet has TTL=0 - dropping");
+        Serial.println("[MSG-ROUTER] ❌ DROPPING - TTL is 0 (expired)");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
     if (packet.ttl > MAX_TTL) {
-        Serial.printf("Message Router: LoRa packet TTL too high (%d > %d) - clamping\n", 
-                     packet.ttl, MAX_TTL);
-        // Note: We'll clamp this in decrementTTL function
+        Serial.printf("[MSG-ROUTER] ⚠️ TTL too high (%d > %d) - will clamp to %d\n", 
+                     packet.ttl, MAX_TTL, MAX_TTL);
     }
     
-    Serial.printf("Message Router: Processing LoRa message type 0x%02X\n", packet.type);
+    Serial.printf("[MSG-ROUTER] TTL: %d (will become %d after routing)\n", packet.ttl, packet.ttl - 1);
     
     // Handle loop prevention test messages
+    Serial.println("[MSG-ROUTER] Checking for loop prevention test messages...");
     LoopPreventionTest::handleReceivedTestMessage(packet, "LoRa");
     
     // Check for duplicates
+    Serial.println("[MSG-ROUTER] Checking for duplicate messages...");
     if (isDuplicate(packet)) {
-        Serial.printf("Message Router: Dropping duplicate LoRa message (ID: 0x%08X)\n", 
-                     generateMessageId(packet));
+        uint32_t msgId = generateMessageId(packet);
+        Serial.printf("[MSG-ROUTER] ❌ DROPPING - Duplicate message detected (ID: 0x%08X)\n", msgId);
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
+    
+    Serial.println("[MSG-ROUTER] ✅ No duplicate found, proceeding with routing");
     
     // Create a mutable copy for TTL processing  
     BitchatPacket routingPacket = packet;
     
+    Serial.println("[MSG-ROUTER] Processing TTL for routing...");
     // Decrement TTL and check if we should forward
     if (!decrementTTL(routingPacket)) {
-        Serial.printf("Message Router: Dropping LoRa message - TTL reached 0\n");
+        Serial.printf("[MSG-ROUTER] ❌ DROPPING - TTL reached 0 after decrement\n");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
+    
+    Serial.printf("[MSG-ROUTER] TTL after decrement: %d\n", routingPacket.ttl);
     
     // Check if we should forward this message
+    Serial.println("[MSG-ROUTER] Evaluating forwarding decision...");
     if (!shouldForward(routingPacket)) {
-        Serial.printf("Message Router: Not forwarding LoRa message - routing decision\n");
+        Serial.printf("[MSG-ROUTER] ❌ NOT FORWARDING - Routing policy decision\n");
+        Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
         return;
     }
     
+    Serial.println("[MSG-ROUTER] ✅ Forwarding approved");
+    
     // Record this message to prevent future duplicates
+    Serial.println("[MSG-ROUTER] Recording message to prevent duplicates...");
     recordMessage(packet); // Record original packet to maintain consistency
     
     // Forward to all connected BLE devices (iOS apps)
+    Serial.println("[MSG-ROUTER] Forwarding to BLE devices...");
     forwardToBLE(routingPacket);
     
     // Also queue for further LoRa relay if TTL allows
     if (routingPacket.ttl > 1) { // Only relay if there's still hop count remaining
+        Serial.printf("[MSG-ROUTER] TTL still allows further relay (%d > 1), queuing for LoRa...\n", routingPacket.ttl);
         if (queueForLoRa(routingPacket)) {
-            Serial.printf("Message Router: LoRa message also queued for further LoRa relay (TTL: %d)\n", 
-                         routingPacket.ttl);
+            Serial.printf("[MSG-ROUTER] ✅ Also queued for further LoRa relay (TTL: %d)\n", routingPacket.ttl);
+        } else {
+            Serial.println("[MSG-ROUTER] ❌ Failed to queue for further LoRa relay");
         }
+    } else {
+        Serial.printf("[MSG-ROUTER] TTL too low (%d) for further LoRa relay\n", routingPacket.ttl);
     }
     
-    Serial.printf("Message Router: LoRa message processed for BLE relay (TTL: %d)\n", routingPacket.ttl);
+    Serial.printf("[MSG-ROUTER] ✅ LoRa message processing complete (final TTL: %d)\n", routingPacket.ttl);
+    Serial.println("[MSG-ROUTER] *** END ROUTING ***\n");
 }
 
 void MessageRouter::performCleanup() {

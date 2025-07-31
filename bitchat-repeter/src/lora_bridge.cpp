@@ -69,26 +69,32 @@ const unsigned long ReliabilityManager::DEDUPE_TIMEOUT_MS;
 const uint8_t ReliabilityManager::MAX_RETRIES;
 
 void LoRaBridge::init() {
-    Serial.println("LoRa Bridge: Initializing SX1262 radio...");
+    Serial.println("[LORA] Initializing SX1262 LoRa radio module...");
     
     // Initialize SPI pins
+    Serial.printf("[LORA] Initializing SPI: SCK=%d, MISO=%d, MOSI=%d, CS=%d\n", 
+                 LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
     SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
     
     // Initialize radio
-    Serial.printf("LoRa Bridge: CS=%d, DIO1=%d, RST=%d, BUSY=%d\n", 
+    Serial.printf("[LORA] Radio pins: CS=%d, DIO1=%d, RST=%d, BUSY=%d\n", 
                  LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
     
+    Serial.println("[LORA] Starting radio initialization...");
     int state = radio.begin();
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("LoRa Bridge: Radio initialization failed, code %d\n", state);
+        Serial.printf("[LORA] *** RADIO INITIALIZATION FAILED ***\n");
+        Serial.printf("[LORA] Error code: %d\n", state);
+        Serial.println("[LORA] Check wiring and power connections!");
         return;
     }
     
-    Serial.println("LoRa Bridge: Radio initialized, configuring parameters...");
+    Serial.println("[LORA] Radio hardware initialized successfully");
+    Serial.println("[LORA] Configuring radio parameters...");
     
     // Configure radio parameters
     if (!configure()) {
-        Serial.println("LoRa Bridge: Configuration failed");
+        Serial.println("[LORA] *** RADIO CONFIGURATION FAILED ***");
         return;
     }
     
@@ -218,20 +224,42 @@ bool LoRaBridge::transmitLoRaPacket(const LoRaPacket& packet) {
 }
 
 bool LoRaBridge::queueLoRaPacket(const LoRaPacket& packet) {
+    Serial.println("\n[LORA-TX] *** QUEUING LoRa PACKET ***");
+    
     if (!initialized) {
-        Serial.println("LoRa Bridge: Cannot queue - radio not initialized");
+        Serial.println("[LORA-TX] ❌ Cannot queue - LoRa radio not initialized");
+        Serial.println("[LORA-TX] *** END QUEUE ATTEMPT ***\n");
         return false;
     }
     
+    // Determine packet type string
+    const char* pktTypeStr = "UNKNOWN";
+    switch (packet.type) {
+        case LORA_PKT_DATA: pktTypeStr = "DATA"; break;
+        case LORA_PKT_NEIGHBOR_ANNOUNCE: pktTypeStr = "NEIGHBOR_ANNOUNCE"; break;
+        case LORA_PKT_ROUTE_REQUEST: pktTypeStr = "ROUTE_REQUEST"; break;
+        case LORA_PKT_ROUTE_REPLY: pktTypeStr = "ROUTE_REPLY"; break;
+        case LORA_PKT_MESH_ACK: pktTypeStr = "MESH_ACK"; break;
+    }
+    
+    Serial.println("[LORA-TX] === PACKET TO QUEUE ===");
+    Serial.printf("[LORA-TX] Type: %s (0x%02X)\n", pktTypeStr, packet.type);
+    Serial.printf("[LORA-TX] Source: %08X\n", packet.srcRepeater);
+    Serial.printf("[LORA-TX] Destination: %08X\n", packet.destRepeater);
+    Serial.printf("[LORA-TX] Next Hop: %08X\n", packet.nextHop);
+    Serial.printf("[LORA-TX] Payload Length: %d bytes\n", packet.payloadLen);
+    Serial.printf("[LORA-TX] Current Queue Size: %d\n", transmissionQueue.size());
+    
     // Apply rate limiting to prevent DoS attacks
     if (!checkRateLimit(packet.srcRepeater)) {
-        Serial.printf("LoRa Bridge: Dropping packet from 0x%08X due to rate limiting\n", packet.srcRepeater);
+        Serial.printf("[LORA-TX] ❌ DROPPING packet from %08X due to rate limiting\n", packet.srcRepeater);
+        Serial.println("[LORA-TX] *** END QUEUE ATTEMPT ***\n");
         return false;
     }
     
     // Check if queue is full
     if (transmissionQueue.size() >= MAX_QUEUE_SIZE) {
-        Serial.printf("LoRa Bridge: Queue full (%d packets), dropping oldest\n", transmissionQueue.size());
+        Serial.printf("[LORA-TX] ⚠️ Queue full (%d packets), dropping oldest\n", transmissionQueue.size());
         transmissionQueue.pop(); // Drop oldest packet
     }
     
@@ -242,8 +270,9 @@ bool LoRaBridge::queueLoRaPacket(const LoRaPacket& packet) {
     // Update rate limiting counter
     updateRateLimit(packet.srcRepeater);
     
-    Serial.printf("LoRa Bridge: Queued LoRa packet (type=0x%02X, queue size: %d)\n", 
-                 packet.type, transmissionQueue.size());
+    Serial.printf("[LORA-TX] ✅ Successfully queued packet (new queue size: %d)\n", transmissionQueue.size());
+    Serial.printf("[LORA-TX] Next transmission attempt in ~%lu ms\n", queuedPacket.nextAttempt - millis());
+    Serial.println("[LORA-TX] *** END QUEUE ATTEMPT ***\n");
     
     return true;
 }
@@ -314,31 +343,37 @@ void LoRaBridge::onReceive() {
 bool LoRaBridge::configure() {
     int state;
     
+    Serial.println("[LORA-CFG] Configuring radio parameters...");
+    
     // Set frequency
+    Serial.printf("[LORA-CFG] Setting frequency: %.1f MHz\n", FREQUENCY);
     state = radio.setFrequency(FREQUENCY);
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("LoRa Bridge: Failed to set frequency, code %d\n", state);
+        Serial.printf("[LORA-CFG] Failed to set frequency, code %d\n", state);
         return false;
     }
     
     // Set bandwidth
+    Serial.printf("[LORA-CFG] Setting bandwidth: %.1f kHz\n", BANDWIDTH);
     state = radio.setBandwidth(BANDWIDTH);
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("LoRa Bridge: Failed to set bandwidth, code %d\n", state);
+        Serial.printf("[LORA-CFG] Failed to set bandwidth, code %d\n", state);
         return false;
     }
     
     // Set spreading factor
+    Serial.printf("[LORA-CFG] Setting spreading factor: SF%d\n", SPREADING_FACTOR);
     state = radio.setSpreadingFactor(SPREADING_FACTOR);
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("LoRa Bridge: Failed to set spreading factor, code %d\n", state);
+        Serial.printf("[LORA-CFG] Failed to set spreading factor, code %d\n", state);
         return false;
     }
     
     // Set coding rate
+    Serial.printf("[LORA-CFG] Setting coding rate: 4/%d\n", CODING_RATE);
     state = radio.setCodingRate(CODING_RATE);
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("LoRa Bridge: Failed to set coding rate, code %d\n", state);
+        Serial.printf("[LORA-CFG] Failed to set coding rate, code %d\n", state);
         return false;
     }
     
@@ -368,12 +403,15 @@ bool LoRaBridge::configure() {
 }
 
 void LoRaBridge::handleReceivedMessage() {
+    Serial.println("\n[LORA-RX] *** LoRa MESSAGE RECEIVED ***");
+    
     // Read the received data
     uint8_t buffer[256];
     int state = radio.readData(buffer, sizeof(buffer));
     
     if (state < 0) {
-        Serial.printf("LoRa Bridge: Failed to read received data, code %d\n", state);
+        Serial.printf("[LORA-RX] ❌ FAILED to read received data, error code: %d\n", state);
+        Serial.println("[LORA-RX] *** END LoRa PROCESSING ***\n");
         return;
     }
     
@@ -384,38 +422,120 @@ void LoRaBridge::handleReceivedMessage() {
     lastRSSI = radio.getRSSI();
     lastSNR = radio.getSNR();
     
-    Serial.printf("LoRa Bridge: Received %d bytes (RSSI: %d dBm, SNR: %.1f dB)\n", 
-                 receivedSize, lastRSSI, lastSNR);
+    Serial.printf("[LORA-RX] Data Length: %d bytes\n", receivedSize);
+    Serial.printf("[LORA-RX] Signal Quality - RSSI: %d dBm, SNR: %.1f dB\n", lastRSSI, lastSNR);
+    Serial.printf("[LORA-RX] Total RX Count: %lu\n", rxCount);
+    Serial.printf("[LORA-RX] Timestamp: %lu ms\n", millis());
+    
+    // Print raw data dump
+    Serial.print("[LORA-RX] Raw Data: ");
+    for (size_t i = 0; i < receivedSize; i++) {
+        Serial.printf("%02X ", buffer[i]);
+        if ((i + 1) % 16 == 0) Serial.print("\n[LORA-RX]           ");
+    }
+    Serial.println();
     
     // Check if this is a LoRa mesh packet (starts with magic 0xBC)
     if (receivedSize >= 3 && buffer[0] == LORA_MAGIC) {
+        Serial.printf("[LORA-RX] ✅ Detected LoRa mesh packet (magic: 0x%02X)\n", buffer[0]);
         handleReceivedLoRaPacket(buffer, receivedSize);
+        Serial.println("[LORA-RX] *** END LoRa PROCESSING ***\n");
         return;
     }
     
     // Otherwise, try to parse as BitChat packet
+    Serial.println("[LORA-RX] Attempting to parse as BitChat packet...");
     BitchatPacket packet;
     ParseResult result = parsePacket(buffer, receivedSize, packet);
     
     if (result != PARSE_SUCCESS) {
-        Serial.printf("LoRa Bridge: Failed to parse received packet, error %d\n", result);
+        Serial.printf("[LORA-RX] ❌ FAILED to parse as BitChat packet, error code: %d\n", result);
+        Serial.println("[LORA-RX] This might be an unknown packet format or corrupted data");
+        Serial.println("[LORA-RX] *** END LoRa PROCESSING ***\n");
         return;
     }
     
+    Serial.println("[LORA-RX] ✅ Successfully parsed as BitChat packet!");
+    
+    // Convert sender ID to hex string for logging
+    char senderHex[17];
+    for (int i = 0; i < 8; i++) {
+        sprintf(senderHex + (i * 2), "%02X", packet.senderID[i]);
+    }
+    senderHex[16] = '\0';
+    
+    // Determine message type string
+    const char* msgTypeStr = "UNKNOWN";
+    switch (packet.type) {
+        case MSG_TYPE_ANNOUNCE: msgTypeStr = "ANNOUNCE"; break;
+        case MSG_TYPE_LEAVE: msgTypeStr = "LEAVE"; break;
+        case MSG_TYPE_MESSAGE: msgTypeStr = "MESSAGE"; break;
+        case MSG_TYPE_DELIVERY_ACK: msgTypeStr = "DELIVERY_ACK"; break;
+        case MSG_TYPE_PROTOCOL_ACK: msgTypeStr = "PROTOCOL_ACK"; break;
+    }
+    
+    Serial.println("[LORA-RX] === BitChat PACKET DETAILS ===");
+    Serial.printf("[LORA-RX] Type: %s (0x%02X)\n", msgTypeStr, packet.type);
+    Serial.printf("[LORA-RX] From: %s\n", senderHex);
+    Serial.printf("[LORA-RX] TTL: %d\n", packet.ttl);
+    Serial.printf("[LORA-RX] Payload Length: %d bytes\n", packet.payloadLength);
+    
+    // Print payload preview if available
+    if (packet.payload && packet.payloadLength > 0) {
+        Serial.print("[LORA-RX] Payload Preview: ");
+        size_t previewLen = (packet.payloadLength < 32) ? packet.payloadLength : 32;
+        for (size_t i = 0; i < previewLen; i++) {
+            if (packet.payload[i] >= 32 && packet.payload[i] <= 126) {
+                Serial.printf("%c", packet.payload[i]);
+            } else {
+                Serial.print(".");
+            }
+        }
+        if (packet.payloadLength > 32) Serial.print("...");
+        Serial.println();
+    }
+    
+    Serial.println("[LORA-RX] Forwarding to message router for BLE relay...");
+    
     // Forward to message router for processing
     MessageRouter::handleLoRaMessage(packet);
+    
+    Serial.println("[LORA-RX] *** END LoRa PROCESSING ***\n");
 }
 
 void LoRaBridge::handleReceivedLoRaPacket(const uint8_t* buffer, size_t receivedSize) {
+    Serial.println("[LORA-RX] === Processing LoRa Mesh Packet ===");
     
     // Parse the LoRa packet
     LoRaPacket loraPacket;
     LoRaParseResult result = parseLoRaPacket(buffer, receivedSize, loraPacket);
     
     if (result != LORA_PARSE_SUCCESS) {
-        Serial.printf("LoRa Bridge: Failed to parse LoRa packet, error %d\n", result);
+        Serial.printf("[LORA-RX] ❌ FAILED to parse LoRa mesh packet, error code: %d\n", result);
+        Serial.println("[LORA-RX] Packet might be corrupted or use unsupported format");
         return;
     }
+    
+    Serial.println("[LORA-RX] ✅ Successfully parsed LoRa mesh packet!");
+    
+    // Determine packet type string
+    const char* pktTypeStr = "UNKNOWN";
+    switch (loraPacket.type) {
+        case LORA_PKT_DATA: pktTypeStr = "DATA"; break;
+        case LORA_PKT_NEIGHBOR_ANNOUNCE: pktTypeStr = "NEIGHBOR_ANNOUNCE"; break;
+        case LORA_PKT_ROUTE_REQUEST: pktTypeStr = "ROUTE_REQUEST"; break;
+        case LORA_PKT_ROUTE_REPLY: pktTypeStr = "ROUTE_REPLY"; break;
+        case LORA_PKT_MESH_ACK: pktTypeStr = "MESH_ACK"; break;
+    }
+    
+    Serial.println("[LORA-RX] === LoRa PACKET DETAILS ===");
+    Serial.printf("[LORA-RX] Type: %s (0x%02X)\n", pktTypeStr, loraPacket.type);
+    Serial.printf("[LORA-RX] Source Repeater: %08X\n", loraPacket.srcRepeater);
+    Serial.printf("[LORA-RX] Dest Repeater: %08X\n", loraPacket.destRepeater);
+    Serial.printf("[LORA-RX] Next Hop: %08X\n", loraPacket.nextHop);
+    Serial.printf("[LORA-RX] Hop Count: %d/%d\n", loraPacket.hopCount, loraPacket.maxHops);
+    Serial.printf("[LORA-RX] Sequence Number: %04X\n", loraPacket.seqNum);
+    Serial.printf("[LORA-RX] Payload Length: %d bytes\n", loraPacket.payloadLen);
     
     // Handle different LoRa packet types
     switch (loraPacket.type) {
