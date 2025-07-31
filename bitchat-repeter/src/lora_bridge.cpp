@@ -1,6 +1,7 @@
 #include "lora_bridge.h"
 #include "message_router.h"
 #include <Arduino.h>
+#include <algorithm>
 
 // NeighborTable static member definitions
 std::map<uint32_t, NeighborEntry> NeighborTable::neighbors;
@@ -9,6 +10,12 @@ std::map<uint32_t, NeighborEntry> NeighborTable::neighbors;
 std::map<uint32_t, RouteEntry> RouteTable::routes;
 std::map<uint32_t, RouteRequestEntry> RouteTable::pendingRequests;
 uint32_t RouteTable::nextRequestId = 1;
+
+// ReliabilityManager static member definitions
+std::map<uint32_t, PendingAckEntry> ReliabilityManager::pendingAcks;
+std::map<uint64_t, MeshDedupeEntry> ReliabilityManager::meshDedupeCache;
+std::map<uint32_t, std::vector<AlternativeRoute>> ReliabilityManager::alternativeRoutes;
+uint32_t ReliabilityManager::nextPacketId = 1;
 
 // LoRaBridge static member definitions
 SX1262 LoRaBridge::radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
@@ -22,6 +29,9 @@ bool LoRaBridge::channelBusy = false;
 unsigned long LoRaBridge::dutyCycleStartTime = 0;
 unsigned long LoRaBridge::totalAirTimeMs = 0;
 uint32_t LoRaBridge::ownSequenceNumber = 1;
+unsigned long LoRaBridge::lastOptimizationUpdate = 0;
+uint8_t LoRaBridge::currentSpreadingFactor = 9;
+bool LoRaBridge::adaptiveRatesEnabled = true;
 int LoRaBridge::lastRSSI = 0;
 float LoRaBridge::lastSNR = 0.0;
 unsigned long LoRaBridge::txCount = 0;
@@ -43,10 +53,16 @@ const unsigned long LoRaBridge::MAX_BACKOFF_MS;
 const uint8_t LoRaBridge::MAX_RETRIES;
 const unsigned long LoRaBridge::DUTY_CYCLE_WINDOW_MS;
 const unsigned long LoRaBridge::MAX_AIRTIME_MS;
+const unsigned long LoRaBridge::OPTIMIZATION_UPDATE_INTERVAL_MS;
 
 // RouteTable constants
 const unsigned long RouteTable::ROUTE_TIMEOUT_MS;
 const unsigned long RouteTable::REQUEST_TIMEOUT_MS;
+
+// ReliabilityManager constants
+const unsigned long ReliabilityManager::ACK_TIMEOUT_MS;
+const unsigned long ReliabilityManager::DEDUPE_TIMEOUT_MS;
+const uint8_t ReliabilityManager::MAX_RETRIES;
 
 void LoRaBridge::init() {
     Serial.println("LoRa Bridge: Initializing SX1262 radio...");
@@ -83,6 +99,9 @@ void LoRaBridge::init() {
     
     // Initialize route table
     RouteTable::init();
+    
+    // Initialize reliability manager
+    ReliabilityManager::init();
     
     // Initialize duty cycle tracking
     dutyCycleStartTime = millis();
@@ -138,6 +157,17 @@ void LoRaBridge::process() {
         RouteTable::cleanupExpiredRoutes();
         RouteTable::cleanupExpiredRequests();
     }
+    
+    // Process reliability timeouts every 100ms
+    static unsigned long lastReliabilityCheck = 0;
+    if (now - lastReliabilityCheck > 100) {
+        lastReliabilityCheck = now;
+        processReliabilityTimeouts();
+        ReliabilityManager::cleanupExpiredEntries();
+    }
+    
+    // Update network optimization (adaptive rates, load balancing)
+    updateNetworkOptimization();
     
     // Process transmission queue
     processTransmissionQueue();
@@ -364,7 +394,7 @@ void LoRaBridge::handleReceivedLoRaPacket(const uint8_t* buffer, size_t received
             break;
             
         case LORA_PKT_MESH_ACK:
-            Serial.printf("LoRa Bridge: Received MESH_ACK packet - not yet implemented\n");
+            handleMeshAck(loraPacket, lastRSSI);
             break;
             
         default:
@@ -503,6 +533,50 @@ uint8_t NeighborTable::calculateLinkQuality(int avgRSSI) {
         return (avgRSSI + 120) * 50 / 20;
     } else {
         return 0;
+    }
+}
+
+uint8_t NeighborTable::getOptimalSpreadingFactor(uint32_t repeaterId) {
+    auto it = neighbors.find(repeaterId);
+    if (it != neighbors.end()) {
+        return it->second.optimalSF;
+    }
+    return 9; // Default SF
+}
+
+void NeighborTable::updateAdaptiveRates() {
+    unsigned long now = millis();
+    
+    for (auto& pair : neighbors) {
+        NeighborEntry& neighbor = pair.second;
+        
+        // Update SF if enough time has passed and we have recent RSSI data
+        if (now - neighbor.lastSFUpdate > SF_UPDATE_INTERVAL_MS && neighbor.packetCount > 0) {
+            uint8_t newSF = calculateOptimalSF(neighbor.avgRSSI);
+            
+            if (newSF != neighbor.optimalSF) {
+                Serial.printf("NeighborTable: Updated SF for %08X from %d to %d (RSSI: %d)\n",
+                             neighbor.repeaterId, neighbor.optimalSF, newSF, neighbor.avgRSSI);
+                neighbor.optimalSF = newSF;
+            }
+            
+            neighbor.lastSFUpdate = now;
+        }
+    }
+}
+
+uint8_t NeighborTable::calculateOptimalSF(int avgRSSI) {
+    // Adaptive spreading factor based on RSSI
+    // Strong links (>-80 dBm): Use SF7 for faster transmission
+    // Medium links (-80 to -100 dBm): Use SF9 for balanced range/speed
+    // Weak links (<-100 dBm): Use SF10 for maximum range
+    
+    if (avgRSSI > LoRaBridge::RSSI_THRESHOLD_STRONG) {
+        return LoRaBridge::SF_STRONG_LINK;  // SF7
+    } else if (avgRSSI > LoRaBridge::RSSI_THRESHOLD_MEDIUM) {
+        return LoRaBridge::SF_MEDIUM_LINK;  // SF9
+    } else {
+        return LoRaBridge::SF_WEAK_LINK;    // SF10
     }
 }
 
@@ -909,13 +983,98 @@ uint32_t RouteTable::generateRequestId() {
     return nextRequestId++;
 }
 
+RouteEntry* RouteTable::findBestRoute(uint32_t destination) {
+    auto it = routes.find(destination);
+    if (it != routes.end() && it->second.isValid) {
+        // Update route metrics before returning
+        RouteEntry& route = it->second;
+        route.routeQuality = calculateRouteScore(route);
+        route.loadFactor = calculateLoadFactor(route.nextHop);
+        return &route;
+    }
+    return nullptr;
+}
+
+void RouteTable::updateRouteMetrics() {
+    for (auto& pair : routes) {
+        RouteEntry& route = pair.second;
+        if (route.isValid) {
+            route.routeQuality = calculateRouteScore(route);
+            route.loadFactor = calculateLoadFactor(route.nextHop);
+        }
+    }
+}
+
+uint8_t RouteTable::calculateRouteScore(const RouteEntry& route) {
+    // Combined score based on:
+    // - Hop count (lower is better)
+    // - Link quality to next hop
+    // - Load factor of next hop
+    // - Power awareness (prefer mains-powered nodes)
+    
+    uint8_t hopScore = 100 - (route.hopCount * 15); // Each hop reduces score by 15
+    if (hopScore < 0) hopScore = 0;
+    
+    NeighborEntry* neighbor = NeighborTable::getNeighbor(route.nextHop);
+    uint8_t linkScore = neighbor ? neighbor->linkQuality : 50; // Default if no data
+    
+    uint8_t loadScore = 100 - route.loadFactor; // Lower load = higher score
+    
+    uint8_t powerScore = isPowerAwareRoute(route.nextHop) ? 80 : 100; // Slight penalty for battery
+    
+    // Weighted average: hop count 30%, link quality 40%, load 20%, power 10%
+    uint8_t combinedScore = (hopScore * 30 + linkScore * 40 + loadScore * 20 + powerScore * 10) / 100;
+    
+    return combinedScore;
+}
+
+uint8_t RouteTable::calculateLoadFactor(uint32_t nextHop) {
+    NeighborEntry* neighbor = NeighborTable::getNeighbor(nextHop);
+    if (neighbor) {
+        // Calculate load based on queue depth and connected devices
+        uint8_t queueLoad = (neighbor->queueDepth * 100) / 20; // Assume max queue of 20
+        uint8_t deviceLoad = (neighbor->connectedDevices * 100) / 10; // Assume max 10 devices
+        
+        if (queueLoad > 100) queueLoad = 100;
+        if (deviceLoad > 100) deviceLoad = 100;
+        
+        // Combined load factor (queue 70%, devices 30%)
+        return (queueLoad * 70 + deviceLoad * 30) / 100;
+    }
+    return 50; // Default medium load if no data
+}
+
+bool RouteTable::isPowerAwareRoute(uint32_t nextHop) {
+    NeighborEntry* neighbor = NeighborTable::getNeighbor(nextHop);
+    if (neighbor) {
+        // Return true if next hop is battery powered (should be avoided for routing)
+        return (neighbor->capabilities & NEIGHBOR_CAP_BATTERY_POWERED) != 0;
+    }
+    return false; // Assume mains powered if unknown
+}
+
 // ================ LoRaBridge Mesh Routing Implementation ================
 
 bool LoRaBridge::routeDataPacket(const LoRaPacket& packet) {
     uint32_t myId = getRepeaterID();
     
+    // Check for mesh-level duplication (different from BitChat deduplication)
+    if (ReliabilityManager::isDuplicatePacket(packet.srcRepeater, packet.seqNum)) {
+        Serial.printf("LoRa Bridge: Dropping duplicate data packet from %08X (seq=%d)\n",
+                     packet.srcRepeater, packet.seqNum);
+        return false;
+    }
+    
+    // Add to seen packets for deduplication
+    ReliabilityManager::addSeenPacket(packet.srcRepeater, packet.seqNum);
+    
     // Check if packet is for us
     if (packet.destRepeater == myId || packet.destRepeater == LORA_DEST_BROADCAST) {
+        // Send ACK if this is a unicast packet (not broadcast)
+        if (packet.destRepeater != LORA_DEST_BROADCAST) {
+            sendMeshAck(packet.seqNum, packet.srcRepeater);
+        }
+        
         // Extract BitChat packet and forward to BLE or process locally
         Serial.printf("LoRa Bridge: Received data packet for us (dest=%08X)\n", packet.destRepeater);
         
@@ -933,20 +1092,27 @@ bool LoRaBridge::routeDataPacket(const LoRaPacket& packet) {
         return false;
     }
     
-    // Look up route to destination
-    RouteEntry* route = RouteTable::findRoute(packet.destRepeater);
+    // Look up best route to destination (with load balancing and power awareness)
+    RouteEntry* route = RouteTable::findBestRoute(packet.destRepeater);
     
     if (route) {
-        // Forward packet using known route
+        // Forward packet using optimal route with reliable delivery
         LoRaPacket forwardPacket = packet;
         forwardPacket.srcRepeater = packet.srcRepeater; // Keep original source
         forwardPacket.nextHop = route->nextHop;
         forwardPacket.hopCount = packet.hopCount + 1;
         
-        Serial.printf("LoRa Bridge: Forwarding data packet to %08X via %08X (hop %d)\n",
-                     packet.destRepeater, route->nextHop, forwardPacket.hopCount);
+        Serial.printf("LoRa Bridge: Forwarding data packet to %08X via %08X (hop %d, quality=%d%%, load=%d%%)\n",
+                     packet.destRepeater, route->nextHop, forwardPacket.hopCount, 
+                     route->routeQuality, route->loadFactor);
         
-        return queueLoRaPacket(forwardPacket);
+        // Use reliable delivery for unicast packets with adaptive transmission
+        if (packet.destRepeater != LORA_DEST_BROADCAST) {
+            return sendReliablePacket(forwardPacket, route->nextHop);
+        } else {
+            // Use adaptive transmission for broadcast packets too
+            return transmitAdaptivePacket(forwardPacket, route->nextHop);
+        }
     } else {
         // No route found, initiate route discovery
         Serial.printf("LoRa Bridge: No route to %08X, initiating discovery\n", packet.destRepeater);
@@ -1208,4 +1374,304 @@ void LoRaBridge::handleRouteReply(const LoRaPacket& packet, int rssi) {
     } else {
         Serial.printf("LoRa Bridge: Cannot forward ROUTE_REPLY - no route to %08X\n", packet.destRepeater);
     }
+}
+
+// ================ ReliabilityManager Implementation ================
+
+void ReliabilityManager::init() {
+    pendingAcks.clear();
+    meshDedupeCache.clear();
+    alternativeRoutes.clear();
+    nextPacketId = 1;
+    Serial.println("ReliabilityManager: Initialized");
+}
+
+uint32_t ReliabilityManager::generatePacketId() {
+    return nextPacketId++;
+}
+
+void ReliabilityManager::addPendingAck(uint32_t packetId, uint32_t destination, const LoRaPacket& packet) {
+    PendingAckEntry entry(packetId, destination, packet);
+    pendingAcks[packetId] = entry;
+    
+    Serial.printf("ReliabilityManager: Added pending ACK for packet %lu to %08X\n", packetId, destination);
+}
+
+void ReliabilityManager::handleMeshAck(uint32_t packetId, uint32_t source) {
+    auto it = pendingAcks.find(packetId);
+    if (it != pendingAcks.end()) {
+        Serial.printf("ReliabilityManager: Received ACK for packet %lu from %08X\n", packetId, source);
+        pendingAcks.erase(it);
+    } else {
+        Serial.printf("ReliabilityManager: Received ACK for unknown packet %lu from %08X\n", packetId, source);
+    }
+}
+
+void ReliabilityManager::processAckTimeouts() {
+    unsigned long now = millis();
+    auto it = pendingAcks.begin();
+    
+    while (it != pendingAcks.end()) {
+        PendingAckEntry& entry = it->second;
+        
+        if (now >= entry.nextRetry) {
+            if (entry.retryCount >= MAX_RETRIES) {
+                // Mark route as failed and try alternative
+                Serial.printf("ReliabilityManager: Packet %lu failed after %d retries, marking route failed\n",
+                             entry.packetId, MAX_RETRIES);
+                
+                markRouteFailed(entry.originalPacket.destRepeater, entry.destination);
+                
+                // Try alternative route
+                AlternativeRoute* altRoute = getAlternativeRoute(entry.originalPacket.destRepeater, entry.destination);
+                if (altRoute) {
+                    Serial.printf("ReliabilityManager: Trying alternative route via %08X\n", altRoute->nextHop);
+                    entry.destination = altRoute->nextHop;
+                    entry.retryCount = 0;
+                    entry.nextRetry = now + ACK_TIMEOUT_MS;
+                    entry.originalPacket.nextHop = altRoute->nextHop;
+                    
+                    // Queue packet with new route
+                    LoRaBridge::queueLoRaPacket(entry.originalPacket);
+                    ++it;
+                } else {
+                    Serial.printf("ReliabilityManager: No alternative route available, dropping packet %lu\n", entry.packetId);
+                    it = pendingAcks.erase(it);
+                }
+            } else {
+                // Retry transmission
+                entry.retryCount++;
+                entry.nextRetry = now + (ACK_TIMEOUT_MS * (1 << entry.retryCount)); // Exponential backoff
+                
+                Serial.printf("ReliabilityManager: Retrying packet %lu (attempt %d)\n", 
+                             entry.packetId, entry.retryCount + 1);
+                
+                LoRaBridge::queueLoRaPacket(entry.originalPacket);
+                ++it;
+            }
+        } else {
+            ++it;
+        }
+    }
+}
+
+void ReliabilityManager::cleanupExpiredEntries() {
+    unsigned long now = millis();
+    
+    // Clean up deduplication cache
+    auto dedupeIt = meshDedupeCache.begin();
+    int dedupeCleanedCount = 0;
+    while (dedupeIt != meshDedupeCache.end()) {
+        if (now - dedupeIt->second.timestamp > DEDUPE_TIMEOUT_MS) {
+            dedupeIt = meshDedupeCache.erase(dedupeIt);
+            dedupeCleanedCount++;
+        } else {
+            ++dedupeIt;
+        }
+    }
+    
+    if (dedupeCleanedCount > 0) {
+        Serial.printf("ReliabilityManager: Cleaned up %d expired dedupe entries\n", dedupeCleanedCount);
+    }
+    
+    // Clean up very old pending ACKs (shouldn't happen with proper timeout handling)
+    auto ackIt = pendingAcks.begin();
+    int ackCleanedCount = 0;
+    while (ackIt != pendingAcks.end()) {
+        if (now - ackIt->second.sentTime > 30000) { // 30 seconds max
+            Serial.printf("ReliabilityManager: Force cleaning very old pending ACK %lu\n", ackIt->second.packetId);
+            ackIt = pendingAcks.erase(ackIt);
+            ackCleanedCount++;
+        } else {
+            ++ackIt;
+        }
+    }
+    
+    if (ackCleanedCount > 0) {
+        Serial.printf("ReliabilityManager: Force cleaned %d very old pending ACKs\n", ackCleanedCount);
+    }
+}
+
+bool ReliabilityManager::isDuplicatePacket(uint32_t sourceRepeater, uint32_t sequenceNumber) {
+    uint64_t key = ((uint64_t)sourceRepeater << 32) | sequenceNumber;
+    return meshDedupeCache.find(key) != meshDedupeCache.end();
+}
+
+void ReliabilityManager::addSeenPacket(uint32_t sourceRepeater, uint32_t sequenceNumber) {
+    uint64_t key = ((uint64_t)sourceRepeater << 32) | sequenceNumber;
+    MeshDedupeEntry entry(sourceRepeater, sequenceNumber);
+    meshDedupeCache[key] = entry;
+}
+
+void ReliabilityManager::cleanupDedupeEntries() {
+    // This is called as part of cleanupExpiredEntries()
+}
+
+void ReliabilityManager::addAlternativeRoute(uint32_t destination, uint32_t nextHop, uint8_t hopCount, uint32_t sequenceNumber, uint8_t priority) {
+    AlternativeRoute route(destination, nextHop, hopCount, sequenceNumber, priority);
+    alternativeRoutes[destination].push_back(route);
+    
+    // Sort routes by priority (lower number = higher priority)
+    std::sort(alternativeRoutes[destination].begin(), alternativeRoutes[destination].end(),
+              [](const AlternativeRoute& a, const AlternativeRoute& b) {
+                  if (a.priority != b.priority) return a.priority < b.priority;
+                  return a.hopCount < b.hopCount; // Prefer shorter routes within same priority
+              });
+    
+    Serial.printf("ReliabilityManager: Added alternative route to %08X via %08X (hops=%d, priority=%d)\n",
+                 destination, nextHop, hopCount, priority);
+}
+
+AlternativeRoute* ReliabilityManager::getAlternativeRoute(uint32_t destination, uint32_t failedNextHop) {
+    auto it = alternativeRoutes.find(destination);
+    if (it != alternativeRoutes.end()) {
+        for (auto& route : it->second) {
+            if (route.nextHop != failedNextHop) {
+                route.lastUsed = millis();
+                return &route;
+            }
+        }
+    }
+    return nullptr;
+}
+
+void ReliabilityManager::markRouteFailed(uint32_t destination, uint32_t nextHop) {
+    // Remove the failed route from main route table
+    RouteEntry* mainRoute = RouteTable::findRoute(destination);
+    if (mainRoute && mainRoute->nextHop == nextHop) {
+        RouteTable::removeRoute(destination);
+        Serial.printf("ReliabilityManager: Marked main route to %08X via %08X as failed\n", destination, nextHop);
+    }
+    
+    // Remove failed next hop from alternative routes
+    auto it = alternativeRoutes.find(destination);
+    if (it != alternativeRoutes.end()) {
+        it->second.erase(
+            std::remove_if(it->second.begin(), it->second.end(),
+                          [nextHop](const AlternativeRoute& route) {
+                              return route.nextHop == nextHop;
+                          }),
+            it->second.end());
+        
+        if (it->second.empty()) {
+            alternativeRoutes.erase(it);
+        }
+    }
+}
+
+// ================ LoRaBridge Reliable Delivery Implementation ================
+
+bool LoRaBridge::sendReliablePacket(const LoRaPacket& packet, uint32_t nextHop) {
+    // Generate unique packet ID for acknowledgment tracking
+    uint32_t packetId = ReliabilityManager::generatePacketId();
+    
+    // Create packet with unique ID
+    LoRaPacket reliablePacket = packet;
+    reliablePacket.seqNum = packetId; // Use seqNum field for packet ID
+    
+    // Add to pending acknowledgments
+    ReliabilityManager::addPendingAck(packetId, nextHop, reliablePacket);
+    
+    // Queue for transmission
+    Serial.printf("LoRa Bridge: Sending reliable packet %lu to %08X\n", packetId, nextHop);
+    return queueLoRaPacket(reliablePacket);
+}
+
+void LoRaBridge::handleMeshAck(const LoRaPacket& packet, int rssi) {
+    if (packet.payloadLen < 4) {
+        Serial.println("LoRa Bridge: Invalid MESH_ACK - payload too small");
+        return;
+    }
+    
+    // Extract packet ID from payload
+    uint32_t packetId;
+    memcpy(&packetId, packet.payload, sizeof(packetId));
+    
+    Serial.printf("LoRa Bridge: Received MESH_ACK for packet %lu from %08X\n", packetId, packet.srcRepeater);
+    
+    // Forward to reliability manager
+    ReliabilityManager::handleMeshAck(packetId, packet.srcRepeater);
+}
+
+void LoRaBridge::sendMeshAck(uint32_t packetId, uint32_t destination) {
+    uint32_t myId = getRepeaterID();
+    
+    // Create MESH_ACK packet
+    LoRaPacket ackPacket;
+    ackPacket.type = LORA_PKT_MESH_ACK;
+    ackPacket.srcRepeater = myId;
+    ackPacket.destRepeater = destination;
+    ackPacket.nextHop = destination; // Direct ACK to sender
+    ackPacket.hopCount = 0;
+    ackPacket.maxHops = 3; // Keep ACKs short-lived
+    ackPacket.seqNum = ownSequenceNumber++;
+    
+    // Pack packet ID in payload
+    ackPacket.payloadLen = sizeof(packetId);
+    memcpy(ackPacket.payload, &packetId, sizeof(packetId));
+    
+    Serial.printf("LoRa Bridge: Sending MESH_ACK for packet %lu to %08X\n", packetId, destination);
+    queueLoRaPacket(ackPacket);
+}
+
+void LoRaBridge::processReliabilityTimeouts() {
+    ReliabilityManager::processAckTimeouts();
+}
+
+// ================ LoRaBridge Adaptive Optimization Implementation ================
+
+bool LoRaBridge::transmitAdaptivePacket(const LoRaPacket& packet, uint32_t targetRepeater) {
+    if (!adaptiveRatesEnabled) {
+        return transmitLoRaPacket(packet);
+    }
+    
+    // Get optimal spreading factor for target
+    uint8_t optimalSF = NeighborTable::getOptimalSpreadingFactor(targetRepeater);
+    
+    // Only change SF if it's different from current and target is not broadcast
+    if (optimalSF != currentSpreadingFactor && targetRepeater != LORA_DEST_BROADCAST) {
+        Serial.printf("LoRa Bridge: Switching to SF%d for transmission to %08X\n", optimalSF, targetRepeater);
+        
+        // Temporarily change spreading factor
+        uint8_t originalSF = currentSpreadingFactor;
+        int state = radio.setSpreadingFactor(optimalSF);
+        if (state == RADIOLIB_ERR_NONE) {
+            currentSpreadingFactor = optimalSF;
+            
+            // Transmit with optimal SF
+            bool result = transmitLoRaPacket(packet);
+            
+            // Restore original SF for general use
+            radio.setSpreadingFactor(originalSF);
+            currentSpreadingFactor = originalSF;
+            
+            return result;
+        } else {
+            Serial.printf("LoRa Bridge: Failed to set SF%d, using default SF%d\n", optimalSF, originalSF);
+        }
+    }
+    
+    // Fall back to normal transmission
+    return transmitLoRaPacket(packet);
+}
+
+void LoRaBridge::updateNetworkOptimization() {
+    unsigned long now = millis();
+    
+    // Only update periodically to avoid excessive processing
+    if (now - lastOptimizationUpdate < OPTIMIZATION_UPDATE_INTERVAL_MS) {
+        return;
+    }
+    
+    lastOptimizationUpdate = now;
+    
+    // Update adaptive rates in neighbor table
+    if (adaptiveRatesEnabled) {
+        NeighborTable::updateAdaptiveRates();
+    }
+    
+    // Update route metrics for load balancing
+    RouteTable::updateRouteMetrics();
+    
+    Serial.println("LoRa Bridge: Network optimization update completed");
 }

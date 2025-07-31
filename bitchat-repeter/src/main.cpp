@@ -205,6 +205,140 @@ void testMeshRouting() {
     Serial.println();
 }
 
+// Test function to verify reliable delivery functionality
+void testReliableDelivery() {
+    Serial.println("=== Testing Reliable Delivery ===");
+    
+    // Test mesh deduplication
+    Serial.println("Testing mesh deduplication...");
+    uint32_t testSource = 0x12345678;
+    uint32_t testSeq1 = 100;
+    uint32_t testSeq2 = 101;
+    
+    // First packet should not be duplicate
+    bool isDupe1 = ReliabilityManager::isDuplicatePacket(testSource, testSeq1);
+    Serial.printf("First packet duplicate check: %s\n", isDupe1 ? "DUPLICATE" : "NEW");
+    
+    // Add packet to seen list
+    ReliabilityManager::addSeenPacket(testSource, testSeq1);
+    
+    // Same packet should now be duplicate
+    bool isDupe2 = ReliabilityManager::isDuplicatePacket(testSource, testSeq1);
+    Serial.printf("Second packet duplicate check: %s\n", isDupe2 ? "DUPLICATE" : "NEW");
+    
+    // Different sequence should not be duplicate
+    bool isDupe3 = ReliabilityManager::isDuplicatePacket(testSource, testSeq2);
+    Serial.printf("Different sequence duplicate check: %s\n", isDupe3 ? "DUPLICATE" : "NEW");
+    
+    // Test packet ID generation
+    Serial.println("Testing packet ID generation...");
+    for (int i = 0; i < 3; i++) {
+        uint32_t packetId = ReliabilityManager::generatePacketId();
+        Serial.printf("Generated packet ID: %lu\n", packetId);
+    }
+    
+    // Test alternative route management
+    Serial.println("Testing alternative routes...");
+    uint32_t destination = 0xABCDEF00;
+    ReliabilityManager::addAlternativeRoute(destination, 0x11111111, 2, 300, 0); // Primary
+    ReliabilityManager::addAlternativeRoute(destination, 0x22222222, 3, 301, 1); // Backup
+    ReliabilityManager::addAlternativeRoute(destination, 0x33333333, 4, 302, 2); // Tertiary
+    
+    // Test getting alternative route when primary fails
+    AlternativeRoute* altRoute = ReliabilityManager::getAlternativeRoute(destination, 0x11111111);
+    if (altRoute) {
+        Serial.printf("Found alternative route to %08X via %08X (hops=%d, priority=%d)\n",
+                     destination, altRoute->nextHop, altRoute->hopCount, altRoute->priority);
+    } else {
+        Serial.println("ERROR: No alternative route found");
+    }
+    
+    Serial.println("SUCCESS: Reliable delivery test completed!");
+    Serial.println("=== End Reliable Delivery Test ===");
+    Serial.println();
+}
+
+// Test function to verify mesh optimization functionality
+void testMeshOptimization() {
+    Serial.println("=== Testing Mesh Optimization ===" );
+    
+    // Test adaptive spreading factor calculation
+    Serial.println("Testing adaptive spreading factor...");
+    
+    // Simulate different RSSI values and test SF calculation
+    int rssiValues[] = {-70, -85, -95, -110, -125};
+    for (int i = 0; i < 5; i++) {
+        uint8_t optimalSF = NeighborTable::calculateOptimalSF(rssiValues[i]);
+        Serial.printf("RSSI: %d dBm -> Optimal SF: %d\n", rssiValues[i], optimalSF);
+    }
+    
+    // Test load balancing metrics
+    Serial.println("Testing load balancing...");
+    
+    // Add test neighbors with different load characteristics
+    NeighborTable::addOrUpdateNeighbor(0x11111111, "HighLoad", 8, 15, 
+                                      NEIGHBOR_CAP_ALWAYS_ON, 1, -75);
+    NeighborTable::addOrUpdateNeighbor(0x22222222, "LowLoad", 2, 3, 
+                                      NEIGHBOR_CAP_ALWAYS_ON, 1, -75);
+    NeighborTable::addOrUpdateNeighbor(0x33333333, "BatteryNode", 1, 2, 
+                                      NEIGHBOR_CAP_BATTERY_POWERED, 1, -80);
+    
+    // Add test routes with different characteristics
+    RouteTable::addRoute(0xAAAAAAAA, 0x11111111, 2, 100); // High load next hop
+    RouteTable::addRoute(0xBBBBBBBB, 0x22222222, 3, 101); // Low load next hop  
+    RouteTable::addRoute(0xCCCCCCCC, 0x33333333, 2, 102); // Battery next hop
+    
+    // Test route scoring
+    Serial.println("Testing route quality scoring...");
+    RouteTable::updateRouteMetrics();
+    
+    RouteEntry* routeA = RouteTable::findBestRoute(0xAAAAAAAA);
+    RouteEntry* routeB = RouteTable::findBestRoute(0xBBBBBBBB);
+    RouteEntry* routeC = RouteTable::findBestRoute(0xCCCCCCCC);
+    
+    if (routeA) {
+        Serial.printf("Route A (high load): quality=%d%%, load=%d%%\n", 
+                     routeA->routeQuality, routeA->loadFactor);
+    }
+    if (routeB) {
+        Serial.printf("Route B (low load): quality=%d%%, load=%d%%\n", 
+                     routeB->routeQuality, routeB->loadFactor);
+    }
+    if (routeC) {
+        Serial.printf("Route C (battery): quality=%d%%, load=%d%%\n", 
+                     routeC->routeQuality, routeC->loadFactor);
+    }
+    
+    // Test power awareness
+    Serial.println("Testing power-aware routing...");
+    bool isPowerAwareA = RouteTable::isPowerAwareRoute(0x11111111);
+    bool isPowerAwareB = RouteTable::isPowerAwareRoute(0x22222222);
+    bool isPowerAwareC = RouteTable::isPowerAwareRoute(0x33333333);
+    
+    Serial.printf("Route A next hop battery powered: %s\n", isPowerAwareA ? "Yes" : "No");
+    Serial.printf("Route B next hop battery powered: %s\n", isPowerAwareB ? "Yes" : "No");
+    Serial.printf("Route C next hop battery powered: %s\n", isPowerAwareC ? "Yes" : "No");
+    
+    // Test adaptive rate updates
+    Serial.println("Testing adaptive rate updates...");
+    NeighborTable::updateAdaptiveRates();
+    
+    // Show updated neighbor table with SF info
+    NeighborTable::printNeighborTable();
+    
+    // Clean up test entries
+    NeighborTable::removeNeighbor(0x11111111);
+    NeighborTable::removeNeighbor(0x22222222);
+    NeighborTable::removeNeighbor(0x33333333);
+    RouteTable::removeRoute(0xAAAAAAAA);
+    RouteTable::removeRoute(0xBBBBBBBB);
+    RouteTable::removeRoute(0xCCCCCCCC);
+    
+    Serial.println("SUCCESS: Mesh optimization test completed!");
+    Serial.println("=== End Mesh Optimization Test ===");
+    Serial.println();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -239,6 +373,12 @@ void setup() {
     
     // Test mesh routing system
     testMeshRouting();
+    
+    // Test reliable delivery system
+    testReliableDelivery();
+    
+    // Test mesh optimization system
+    testMeshOptimization();
     
     digitalWrite(LED_PIN, LOW);  // Turn off LED after startup
     Serial.println("BitChat Repeater ready");
