@@ -22,9 +22,9 @@ void setup() {
     pinMode(VEXT_ENABLE, OUTPUT);
     digitalWrite(VEXT_ENABLE, LOW);  // Enable Vext
     
-    // TODO: Initialize modules
+    // Initialize modules
     // ConfigManager::init();
-    // BLEMesh::init();
+    BLEMesh::init();
     // LoRaBridge::init();
     // MessageRouter::init();
     
@@ -33,8 +33,8 @@ void setup() {
 }
 
 void loop() {
-    // TODO: Main loop processing
-    // BLEMesh::process();
+    // Main loop processing
+    BLEMesh::process();
     // LoRaBridge::process();
     // MessageRouter::process();
     
