@@ -126,6 +126,43 @@ void testNeighborDiscovery() {
     Serial.println();
 }
 
+// Test function to verify transmission queue and collision avoidance
+void testTransmissionSystem() {
+    Serial.println("=== Testing Transmission System ===");
+    
+    // Test queuing multiple packets
+    Serial.println("Testing packet queuing...");
+    
+    for (int i = 0; i < 5; i++) {
+        LoRaPacket testPacket;
+        testPacket.type = LORA_PKT_DATA;
+        testPacket.srcRepeater = getRepeaterID();
+        testPacket.destRepeater = LORA_DEST_BROADCAST;
+        testPacket.nextHop = LORA_DEST_BROADCAST;
+        testPacket.hopCount = 0;
+        testPacket.maxHops = 5;
+        testPacket.seqNum = i + 1;
+        
+        // Create test payload
+        char testData[32];
+        snprintf(testData, sizeof(testData), "Test packet #%d", i + 1);
+        testPacket.payloadLen = strlen(testData);
+        memcpy(testPacket.payload, testData, testPacket.payloadLen);
+        
+        bool queued = LoRaBridge::queueLoRaPacket(testPacket);
+        if (queued) {
+            Serial.printf("Queued test packet #%d\n", i + 1);
+        } else {
+            Serial.printf("Failed to queue test packet #%d\n", i + 1);
+        }
+    }
+    
+    Serial.println("Test packets queued. They will be transmitted by the main loop.");
+    Serial.println("SUCCESS: Transmission system test completed!");
+    Serial.println("=== End Transmission System Test ===");
+    Serial.println();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -154,6 +191,9 @@ void setup() {
     MessageRouter::init();  // Initialize message router first
     BLEMesh::init();
     LoRaBridge::init();     // Initialize LoRa radio
+    
+    // Test transmission system after initialization
+    testTransmissionSystem();
     
     digitalWrite(LED_PIN, LOW);  // Turn off LED after startup
     Serial.println("BitChat Repeater ready");

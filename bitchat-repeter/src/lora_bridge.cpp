@@ -11,6 +11,11 @@ bool LoRaBridge::initialized = false;
 bool LoRaBridge::receiving = false;
 unsigned long LoRaBridge::lastRxCheck = 0;
 unsigned long LoRaBridge::lastNeighborAnnouncement = 0;
+std::queue<QueuedPacket> LoRaBridge::transmissionQueue;
+unsigned long LoRaBridge::lastTransmission = 0;
+bool LoRaBridge::channelBusy = false;
+unsigned long LoRaBridge::dutyCycleStartTime = 0;
+unsigned long LoRaBridge::totalAirTimeMs = 0;
 int LoRaBridge::lastRSSI = 0;
 float LoRaBridge::lastSNR = 0.0;
 unsigned long LoRaBridge::txCount = 0;
@@ -25,6 +30,13 @@ const uint8_t LoRaBridge::CODING_RATE = 5;          // 4/5 coding rate
 const int8_t LoRaBridge::TX_POWER = 20;             // dBm (maximum for most regions)
 const uint8_t LoRaBridge::SYNC_WORD = 0x12;         // Private network sync word
 const unsigned long LoRaBridge::NEIGHBOR_ANNOUNCE_INTERVAL_MS;
+const size_t LoRaBridge::MAX_QUEUE_SIZE;
+const unsigned long LoRaBridge::CAD_TIMEOUT_MS;
+const unsigned long LoRaBridge::MIN_BACKOFF_MS;
+const unsigned long LoRaBridge::MAX_BACKOFF_MS;
+const uint8_t LoRaBridge::MAX_RETRIES;
+const unsigned long LoRaBridge::DUTY_CYCLE_WINDOW_MS;
+const unsigned long LoRaBridge::MAX_AIRTIME_MS;
 
 void LoRaBridge::init() {
     Serial.println("LoRa Bridge: Initializing SX1262 radio...");
@@ -58,6 +70,10 @@ void LoRaBridge::init() {
     
     // Initialize neighbor table
     NeighborTable::init();
+    
+    // Initialize duty cycle tracking
+    dutyCycleStartTime = millis();
+    totalAirTimeMs = 0;
     
     initialized = true;
     Serial.println("LoRa Bridge: Initialization complete");
@@ -101,6 +117,9 @@ void LoRaBridge::process() {
         lastNeighborCleanup = now;
         NeighborTable::cleanupStaleNeighbors();
     }
+    
+    // Process transmission queue
+    processTransmissionQueue();
 }
 
 bool LoRaBridge::transmit(const BitchatPacket& packet) {
@@ -140,39 +159,30 @@ bool LoRaBridge::transmit(const BitchatPacket& packet) {
 }
 
 bool LoRaBridge::transmitLoRaPacket(const LoRaPacket& packet) {
+    // Queue the packet instead of transmitting directly
+    return queueLoRaPacket(packet);
+}
+
+bool LoRaBridge::queueLoRaPacket(const LoRaPacket& packet) {
     if (!initialized) {
-        Serial.println("LoRa Bridge: Cannot transmit - radio not initialized");
+        Serial.println("LoRa Bridge: Cannot queue - radio not initialized");
         return false;
     }
     
-    // Serialize LoRa packet to binary data
-    uint8_t buffer[256];
-    size_t packetSize = serializeLoRaPacket(packet, buffer, sizeof(buffer));
-    
-    if (packetSize == 0) {
-        Serial.println("LoRa Bridge: Failed to serialize LoRa packet for transmission");
-        return false;
+    // Check if queue is full
+    if (transmissionQueue.size() >= MAX_QUEUE_SIZE) {
+        Serial.printf("LoRa Bridge: Queue full (%d packets), dropping oldest\n", transmissionQueue.size());
+        transmissionQueue.pop(); // Drop oldest packet
     }
     
-    // Temporarily stop receiving
-    receiving = false;
+    // Add packet to queue
+    QueuedPacket queuedPacket(packet);
+    transmissionQueue.push(queuedPacket);
     
-    // Transmit the packet
-    int state = radio.transmit(buffer, packetSize);
+    Serial.printf("LoRa Bridge: Queued LoRa packet (type=0x%02X, queue size: %d)\n", 
+                 packet.type, transmissionQueue.size());
     
-    bool success = (state == RADIOLIB_ERR_NONE);
-    if (success) {
-        txCount++;
-        Serial.printf("LoRa Bridge: Transmitted LoRa packet (type=0x%02X, size=%d bytes)\n", 
-                     packet.type, packetSize);
-    } else {
-        Serial.printf("LoRa Bridge: LoRa transmission failed, code %d\n", state);
-    }
-    
-    // Restart receiving
-    startReceive();
-    
-    return success;
+    return true;
 }
 
 void LoRaBridge::startReceive() {
@@ -548,4 +558,178 @@ void LoRaBridge::handleNeighborAnnouncement(const LoRaPacket& packet, int rssi) 
         announcement->firmwareVersion,
         rssi
     );
+}
+
+// ================ LoRaBridge Transmission Management ================
+
+void LoRaBridge::processTransmissionQueue() {
+    if (!initialized || transmissionQueue.empty()) {
+        return;
+    }
+    
+    unsigned long now = millis();
+    
+    // Get the next packet to transmit
+    QueuedPacket& queuedPacket = transmissionQueue.front();
+    
+    // Check if it's time to attempt transmission
+    if (now < queuedPacket.nextAttempt) {
+        return;
+    }
+    
+    // Check if packet has exceeded max retries
+    if (queuedPacket.retryCount >= MAX_RETRIES) {
+        Serial.printf("LoRa Bridge: Dropping packet after %d retries\n", MAX_RETRIES);
+        transmissionQueue.pop();
+        return;
+    }
+    
+    // Check if channel is clear using CAD
+    if (!isChannelClear()) {
+        // Channel busy, apply exponential backoff
+        unsigned long backoff = getRandomBackoff(queuedPacket.retryCount);
+        queuedPacket.nextAttempt = now + backoff;
+        queuedPacket.retryCount++;
+        
+        Serial.printf("LoRa Bridge: Channel busy, backing off %lu ms (retry %d)\n", 
+                     backoff, queuedPacket.retryCount);
+        return;
+    }
+    
+    // Calculate airtime for this packet
+    uint8_t buffer[256];
+    size_t packetSize = serializeLoRaPacket(queuedPacket.packet, buffer, sizeof(buffer));
+    
+    if (packetSize == 0) {
+        Serial.println("LoRa Bridge: Failed to serialize queued packet, dropping");
+        transmissionQueue.pop();
+        return;
+    }
+    
+    unsigned long airTime = calculateAirTime(packetSize);
+    
+    // Check duty cycle before transmitting
+    if (isDutyCycleExceeded(airTime)) {
+        Serial.printf("LoRa Bridge: Duty cycle exceeded, dropping packet (airtime: %lu ms)\n", airTime);
+        transmissionQueue.pop();
+        return;
+    }
+    
+    // Temporarily stop receiving
+    receiving = false;
+    
+    // Transmit the packet
+    int state = radio.transmit(buffer, packetSize);
+    
+    bool success = (state == RADIOLIB_ERR_NONE);
+    if (success) {
+        txCount++;
+        updateDutyCycle(airTime);
+        lastTransmission = now;
+        
+        Serial.printf("LoRa Bridge: Transmitted packet (type=0x%02X, size=%d bytes, airtime=%lu ms)\n", 
+                     queuedPacket.packet.type, packetSize, airTime);
+        
+        // Remove successfully transmitted packet from queue
+        transmissionQueue.pop();
+    } else {
+        Serial.printf("LoRa Bridge: Transmission failed, code %d (retry %d)\n", 
+                     state, queuedPacket.retryCount + 1);
+        
+        // Schedule retry with exponential backoff
+        unsigned long backoff = getRandomBackoff(queuedPacket.retryCount);
+        queuedPacket.nextAttempt = now + backoff;
+        queuedPacket.retryCount++;
+    }
+    
+    // Restart receiving
+    startReceive();
+}
+
+bool LoRaBridge::isChannelClear() {
+    if (!initialized) {
+        return false;
+    }
+    
+    // Perform Channel Activity Detection (CAD)
+    int state = radio.scanChannel();
+    
+    // RadioLib returns RADIOLIB_ERR_NONE if channel is free
+    // Returns RADIOLIB_CHANNEL_ACTIVITY_DETECTED if busy
+    bool channelClear = (state == RADIOLIB_ERR_NONE);
+    
+    if (!channelClear) {
+        Serial.println("LoRa Bridge: CAD detected channel activity");
+    }
+    
+    return channelClear;
+}
+
+unsigned long LoRaBridge::calculateAirTime(size_t packetSize) {
+    // Simplified airtime calculation for SF9, BW125, CR4/5
+    // This is an approximation - real calculation is more complex
+    
+    // Symbol time = (2^SF) / BW = (2^9) / 125000 = 4.096 ms
+    float symbolTime = 4.096;
+    
+    // Preamble: 8 symbols + 4.25 symbols
+    float preambleTime = (8 + 4.25) * symbolTime;
+    
+    // Payload symbols (simplified calculation)
+    // Real calculation involves more complex formula
+    int payloadSymbols = (int)((packetSize * 8.0 + 28 + 16) / (4 * (9 - 2))) + 1;
+    if (payloadSymbols < 0) payloadSymbols = 0;
+    
+    float payloadTime = payloadSymbols * symbolTime;
+    
+    unsigned long totalTime = (unsigned long)(preambleTime + payloadTime);
+    
+    // Add safety margin
+    return totalTime + 10;
+}
+
+bool LoRaBridge::isDutyCycleExceeded(unsigned long airTimeMs) {
+    unsigned long now = millis();
+    
+    // Reset duty cycle window if more than 1 hour has passed
+    if (now - dutyCycleStartTime >= DUTY_CYCLE_WINDOW_MS) {
+        dutyCycleStartTime = now;
+        totalAirTimeMs = 0;
+    }
+    
+    // Check if adding this transmission would exceed the limit
+    return (totalAirTimeMs + airTimeMs) > MAX_AIRTIME_MS;
+}
+
+void LoRaBridge::updateDutyCycle(unsigned long airTimeMs) {
+    totalAirTimeMs += airTimeMs;
+    
+    // Log duty cycle usage every 10 transmissions
+    static int transmissionCount = 0;
+    transmissionCount++;
+    
+    if (transmissionCount % 10 == 0) {
+        float dutyCyclePercent = (float)totalAirTimeMs / (float)MAX_AIRTIME_MS * 100.0;
+        Serial.printf("LoRa Bridge: Duty cycle usage: %.1f%% (%lu/%lu ms)\n", 
+                     dutyCyclePercent, totalAirTimeMs, MAX_AIRTIME_MS);
+    }
+}
+
+unsigned long LoRaBridge::getRandomBackoff(uint8_t retryCount) {
+    // Exponential backoff: base_time * (2^retryCount) + random
+    unsigned long baseTime = MIN_BACKOFF_MS;
+    unsigned long maxTime = MAX_BACKOFF_MS;
+    
+    // Calculate exponential backoff
+    unsigned long backoffTime = baseTime << retryCount; // baseTime * 2^retryCount
+    
+    // Cap at maximum backoff time
+    if (backoffTime > maxTime) {
+        backoffTime = maxTime;
+    }
+    
+    // Add random jitter (0-50% of backoff time)
+    unsigned long jitter = random(0, backoffTime / 2);
+    
+    return backoffTime + jitter;
 }

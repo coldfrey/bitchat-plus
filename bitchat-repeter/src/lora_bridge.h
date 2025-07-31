@@ -5,6 +5,19 @@
 #include "bitchat_protocol.h"
 #include <map>
 #include <string>
+#include <queue>
+
+// Transmission queue entry for LoRa packets
+struct QueuedPacket {
+    LoRaPacket packet;
+    unsigned long queueTime;      // When packet was queued
+    uint8_t retryCount;           // Number of transmission attempts
+    unsigned long nextAttempt;    // When to attempt next transmission
+    
+    QueuedPacket() : queueTime(0), retryCount(0), nextAttempt(0) {}
+    QueuedPacket(const LoRaPacket& pkt) : packet(pkt), queueTime(millis()), 
+                                         retryCount(0), nextAttempt(millis()) {}
+};
 
 // Neighbor table entry for mesh network discovery
 struct NeighborEntry {
@@ -58,6 +71,7 @@ public:
     // Message transmission
     static bool transmit(const BitchatPacket& packet);
     static bool transmitLoRaPacket(const LoRaPacket& packet);
+    static bool queueLoRaPacket(const LoRaPacket& packet);
     static void startReceive();
     
     // Neighbor discovery
@@ -79,6 +93,17 @@ private:
     static unsigned long lastRxCheck;
     static unsigned long lastNeighborAnnouncement;
     
+    // Transmission queue and collision avoidance
+    static std::queue<QueuedPacket> transmissionQueue;
+    static unsigned long lastTransmission;
+    static bool channelBusy;
+    
+    // Duty cycle tracking (1% per hour = 36 seconds)
+    static unsigned long dutyCycleStartTime;
+    static unsigned long totalAirTimeMs;
+    static const unsigned long DUTY_CYCLE_WINDOW_MS = 3600000; // 1 hour
+    static const unsigned long MAX_AIRTIME_MS = 36000;         // 36 seconds per hour
+    
     // Statistics
     static int lastRSSI;
     static float lastSNR;
@@ -96,6 +121,13 @@ private:
     // Neighbor discovery constants
     static const unsigned long NEIGHBOR_ANNOUNCE_INTERVAL_MS = 60000;  // 60 seconds
     
+    // Transmission constants
+    static const size_t MAX_QUEUE_SIZE = 20;                          // Maximum queued packets
+    static const unsigned long CAD_TIMEOUT_MS = 100;                  // CAD detection timeout
+    static const unsigned long MIN_BACKOFF_MS = 50;                   // Minimum backoff time
+    static const unsigned long MAX_BACKOFF_MS = 400;                  // Maximum backoff time
+    static const uint8_t MAX_RETRIES = 3;                            // Maximum transmission retries
+    
     // Interrupt handling
     static volatile bool receivedFlag;
     static void onReceive();
@@ -104,4 +136,12 @@ private:
     static bool configure();
     static void handleReceivedMessage();
     static void handleReceivedLoRaPacket(const uint8_t* buffer, size_t size);
+    
+    // Transmission helpers
+    static void processTransmissionQueue();
+    static bool isChannelClear();
+    static unsigned long calculateAirTime(size_t packetSize);
+    static bool isDutyCycleExceeded(unsigned long airTimeMs);
+    static void updateDutyCycle(unsigned long airTimeMs);
+    static unsigned long getRandomBackoff(uint8_t retryCount);
 };
