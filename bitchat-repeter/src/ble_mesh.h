@@ -5,7 +5,18 @@
 #include <NimBLEService.h>
 #include <NimBLECharacteristic.h>
 #include <NimBLEAdvertising.h>
+#include <map>
 #include "bitchat_protocol.h"
+
+// Connection state for each iOS device
+struct ConnectionState {
+    String peerID;              // iOS device peer ID
+    uint8_t negotiatedVersion;  // Agreed protocol version (0 = not negotiated)
+    bool isReady;              // True after successful version negotiation
+    unsigned long connectTime; // When the connection was established
+    
+    ConnectionState() : negotiatedVersion(0), isReady(false), connectTime(0) {}
+};
 
 class BLEMesh {
 public:
@@ -26,12 +37,20 @@ private:
     static String myPeerID;
     static void generatePeerID();
     
+    // Connection state management
+    static std::map<uint16_t, ConnectionState> connectionStates; // Map connection handle to state
+    
+    // Version negotiation
+    static void handleVersionHello(const uint8_t* data, size_t length, uint16_t connectionHandle);
+    static void sendVersionAck(uint8_t agreedVersion, uint16_t connectionHandle);
+    static bool isConnectionReady(uint16_t connectionHandle);
+    
     // BLE Server callbacks
     static void startAdvertising();
     
 public:
     // Message handling  
-    static void handleReceivedData(const uint8_t* data, size_t length);
+    static void handleReceivedData(const uint8_t* data, size_t length, uint16_t connectionHandle);
 
 private:
 };

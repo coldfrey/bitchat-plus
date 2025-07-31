@@ -49,8 +49,8 @@
 #define FLAG_HAS_SIGNATURE          0x02
 #define FLAG_IS_COMPRESSED          0x04
 
-// Default protocol version
-#define PROTOCOL_VERSION            3
+// Default protocol version (compatible with iOS BitChat app)
+#define PROTOCOL_VERSION            1
 #define DEFAULT_TTL                 10
 
 // BitchatPacket structure (from BitchatProtocol.swift)
