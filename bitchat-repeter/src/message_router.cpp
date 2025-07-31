@@ -4,6 +4,7 @@
 // Static member definitions
 MessageCache MessageRouter::dedupCache;
 unsigned long MessageRouter::lastCleanup = 0;
+std::vector<LoRaQueueEntry> MessageRouter::loraQueue;
 
 // MessageCache implementation
 MessageCache::MessageCache() : currentIndex(0), totalEntries(0) {
@@ -88,8 +89,12 @@ void MessageRouter::init() {
 }
 
 void MessageRouter::process() {
-    // Perform periodic cleanup every 30 seconds
     unsigned long now = millis();
+    
+    // Process LoRa transmission queue
+    processLoRaQueue();
+    
+    // Perform periodic cleanup every 30 seconds
     if (now - lastCleanup > 30000) {
         performCleanup();
         lastCleanup = now;
@@ -147,7 +152,8 @@ void MessageRouter::recordMessage(const BitchatPacket& packet) {
 }
 
 void MessageRouter::handleBLEMessage(const BitchatPacket& packet, uint16_t connectionHandle) {
-    Serial.printf("Message Router: Processing BLE message type 0x%02X\n", packet.type);
+    Serial.printf("Message Router: Processing BLE message type 0x%02X from connection %d\n", 
+                 packet.type, connectionHandle);
     
     // Check for duplicates
     if (isDuplicate(packet)) {
@@ -156,11 +162,30 @@ void MessageRouter::handleBLEMessage(const BitchatPacket& packet, uint16_t conne
         return;
     }
     
-    // Record this message to prevent future duplicates
-    recordMessage(packet);
+    // Create a mutable copy for TTL processing
+    BitchatPacket routingPacket = packet;
     
-    // TODO: Forward to LoRa mesh for relay
-    Serial.printf("Message Router: BLE message accepted for LoRa relay (TTL: %d)\n", packet.ttl);
+    // Decrement TTL and check if we should forward
+    if (!decrementTTL(routingPacket)) {
+        Serial.printf("Message Router: Dropping BLE message - TTL reached 0\n");
+        return;
+    }
+    
+    // Check if we should forward this message
+    if (!shouldForward(routingPacket, connectionHandle)) {
+        Serial.printf("Message Router: Not forwarding BLE message - routing decision\n");
+        return;
+    }
+    
+    // Record this message to prevent future duplicates
+    recordMessage(packet); // Record original packet to maintain consistency
+    
+    // Queue for LoRa mesh transmission
+    if (queueForLoRa(routingPacket)) {
+        Serial.printf("Message Router: BLE message queued for LoRa relay (TTL: %d)\n", routingPacket.ttl);
+    } else {
+        Serial.printf("Message Router: Failed to queue BLE message for LoRa (queue full)\n");
+    }
 }
 
 void MessageRouter::handleLoRaMessage(const BitchatPacket& packet) {
@@ -173,18 +198,156 @@ void MessageRouter::handleLoRaMessage(const BitchatPacket& packet) {
         return;
     }
     
-    // Record this message to prevent future duplicates
-    recordMessage(packet);
+    // Create a mutable copy for TTL processing  
+    BitchatPacket routingPacket = packet;
     
-    // TODO: Forward to connected BLE devices
-    Serial.printf("Message Router: LoRa message accepted for BLE relay (TTL: %d)\n", packet.ttl);
+    // Decrement TTL and check if we should forward
+    if (!decrementTTL(routingPacket)) {
+        Serial.printf("Message Router: Dropping LoRa message - TTL reached 0\n");
+        return;
+    }
+    
+    // Check if we should forward this message
+    if (!shouldForward(routingPacket)) {
+        Serial.printf("Message Router: Not forwarding LoRa message - routing decision\n");
+        return;
+    }
+    
+    // Record this message to prevent future duplicates
+    recordMessage(packet); // Record original packet to maintain consistency
+    
+    // Forward to all connected BLE devices (iOS apps)
+    forwardToBLE(routingPacket);
+    
+    // Also queue for further LoRa relay if TTL allows
+    if (routingPacket.ttl > 1) { // Only relay if there's still hop count remaining
+        if (queueForLoRa(routingPacket)) {
+            Serial.printf("Message Router: LoRa message also queued for further LoRa relay (TTL: %d)\n", 
+                         routingPacket.ttl);
+        }
+    }
+    
+    Serial.printf("Message Router: LoRa message processed for BLE relay (TTL: %d)\n", routingPacket.ttl);
 }
 
 void MessageRouter::performCleanup() {
     Serial.println("Message Router: Performing periodic cleanup...");
     dedupCache.cleanupExpired();
     
-    // Log cache statistics
-    Serial.printf("Message Router: Cache statistics - Size: %d/1000 messages\n", 
-                 dedupCache.getSize());
+    // Log cache and queue statistics
+    Serial.printf("Message Router: Cache: %d/1000 messages, LoRa Queue: %d/%d\n", 
+                 dedupCache.getSize(), loraQueue.size(), MAX_LORA_QUEUE_SIZE);
+}
+
+// TTL and routing logic implementation
+bool MessageRouter::decrementTTL(BitchatPacket& packet) {
+    if (packet.ttl <= 1) {
+        return false; // TTL exhausted, don't forward
+    }
+    packet.ttl--; // Decrement for next hop
+    return true;
+}
+
+bool MessageRouter::shouldForward(const BitchatPacket& packet, uint16_t sourceConnectionHandle) {
+    // Basic forwarding logic - can be enhanced later
+    
+    // Don't forward version negotiation messages (they're direct only)
+    if (packet.type == MSG_TYPE_VERSION_HELLO || packet.type == MSG_TYPE_VERSION_ACK) {
+        return false;
+    }
+    
+    // Don't forward messages with TTL of 0 or 1 (no hops left)
+    if (packet.ttl <= 1) {
+        return false;
+    }
+    
+    // Forward all other supported message types
+    switch (packet.type) {
+        case MSG_TYPE_ANNOUNCE:
+        case MSG_TYPE_LEAVE:
+        case MSG_TYPE_MESSAGE:
+        case MSG_TYPE_DELIVERY_ACK:
+        case MSG_TYPE_PROTOCOL_ACK:
+            return true;
+        default:
+            return false; // Unknown message types not forwarded
+    }
+}
+
+// LoRa transmission queue implementation
+bool MessageRouter::queueForLoRa(const BitchatPacket& packet) {
+    // Check queue capacity
+    if (loraQueue.size() >= MAX_LORA_QUEUE_SIZE) {
+        Serial.printf("Message Router: LoRa queue full (%d/%d), dropping message\n", 
+                     loraQueue.size(), MAX_LORA_QUEUE_SIZE);
+        return false;
+    }
+    
+    // Create queue entry
+    LoRaQueueEntry entry;
+    entry.packet = packet;
+    entry.scheduleTime = millis() + getRandomDelay(); // Add random delay
+    entry.retryCount = 0;
+    
+    // Copy packet payload data to our storage
+    copyPacketData(entry, packet);
+    
+    // Add to queue
+    loraQueue.push_back(entry);
+    
+    Serial.printf("Message Router: Queued message for LoRa transmission (delay: %dms, queue: %d/%d)\n",
+                 (int)(entry.scheduleTime - millis()), loraQueue.size(), MAX_LORA_QUEUE_SIZE);
+    
+    return true;
+}
+
+void MessageRouter::processLoRaQueue() {
+    if (loraQueue.empty()) {
+        return;
+    }
+    
+    unsigned long now = millis();
+    
+    // Process entries that are ready to transmit
+    for (auto it = loraQueue.begin(); it != loraQueue.end(); ) {
+        if (now >= it->scheduleTime) {
+            Serial.printf("Message Router: Transmitting queued LoRa message (type: 0x%02X, TTL: %d)\n",
+                         it->packet.type, it->packet.ttl);
+            
+            // TODO: Actually transmit via LoRa
+            // LoRaBridge::transmit(it->packet);
+            Serial.printf("Message Router: [TODO] LoRa transmission would happen here\n");
+            
+            // Remove from queue after successful transmission
+            it = loraQueue.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void MessageRouter::forwardToBLE(const BitchatPacket& packet) {
+    Serial.printf("Message Router: Forwarding LoRa message to BLE devices (type: 0x%02X)\n", packet.type);
+    
+    // TODO: Send to all connected BLE devices
+    // BLEMesh::sendToAllConnections(packet);
+    Serial.printf("Message Router: [TODO] BLE forwarding would happen here\n");
+}
+
+// Helper functions
+unsigned long MessageRouter::getRandomDelay() {
+    // Random delay between 0-100ms to prevent LoRa collisions
+    return random(0, 101);
+}
+
+void MessageRouter::copyPacketData(LoRaQueueEntry& entry, const BitchatPacket& packet) {
+    // Copy payload data to our local storage
+    if (packet.payload && packet.payloadLength > 0) {
+        size_t copySize = (packet.payloadLength < sizeof(entry.packetData)) ? 
+                         packet.payloadLength : sizeof(entry.packetData);
+        memcpy(entry.packetData, packet.payload, copySize);
+        entry.packet.payload = entry.packetData; // Point to our storage
+    } else {
+        entry.packet.payload = nullptr;
+    }
 }

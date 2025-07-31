@@ -33,6 +33,18 @@ public:
     size_t getSize() const { return totalEntries < CACHE_SIZE ? totalEntries : CACHE_SIZE; }
 };
 
+// Message queue entry for LoRa transmission
+struct LoRaQueueEntry {
+    BitchatPacket packet;
+    uint8_t packetData[256];      // Storage for packet payload
+    unsigned long scheduleTime;   // When to transmit (with random delay)
+    uint8_t retryCount;          // Number of transmission attempts
+    
+    LoRaQueueEntry() : scheduleTime(0), retryCount(0) {
+        memset(packetData, 0, sizeof(packetData));
+    }
+};
+
 class MessageRouter {
 public:
     static void init();
@@ -47,10 +59,27 @@ public:
     static void handleBLEMessage(const BitchatPacket& packet, uint16_t connectionHandle);
     static void handleLoRaMessage(const BitchatPacket& packet);
     
+    // TTL and routing logic
+    static bool decrementTTL(BitchatPacket& packet);
+    static bool shouldForward(const BitchatPacket& packet, uint16_t sourceConnectionHandle = 0);
+    
+    // LoRa transmission queue
+    static bool queueForLoRa(const BitchatPacket& packet);
+    static void processLoRaQueue();
+    static void forwardToBLE(const BitchatPacket& packet);
+    
 private:
     static MessageCache dedupCache;
     static unsigned long lastCleanup;  // Last time we cleaned up expired entries
     
+    // LoRa transmission queue
+    static std::vector<LoRaQueueEntry> loraQueue;
+    static const size_t MAX_LORA_QUEUE_SIZE = 50;
+    
+    // Random delay for collision avoidance
+    static unsigned long getRandomDelay();
+    
     // Helper functions
     static void performCleanup();
+    static void copyPacketData(LoRaQueueEntry& entry, const BitchatPacket& packet);
 };
