@@ -249,6 +249,12 @@ public:
     static int getLastRSSI();
     static float getLastSNR();
     
+    // Power management
+    static void setTxPower(int8_t power);
+    static int8_t getTxPower();
+    static void setAdaptivePower(bool enabled);
+    static bool isAdaptivePowerEnabled();
+    
     // Adaptive transmission optimization
     static bool transmitAdaptivePacket(const LoRaPacket& packet, uint32_t targetRepeater);
     static void updateNetworkOptimization();
@@ -288,6 +294,10 @@ private:
     static unsigned long lastOptimizationUpdate;
     static uint8_t currentSpreadingFactor;
     static bool adaptiveRatesEnabled;
+    
+    // Power management state
+    static int8_t currentTxPower;
+    static bool adaptivePowerEnabled;
     
     // Statistics
     static int lastRSSI;

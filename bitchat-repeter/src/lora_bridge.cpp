@@ -32,6 +32,8 @@ uint32_t LoRaBridge::ownSequenceNumber = 1;
 unsigned long LoRaBridge::lastOptimizationUpdate = 0;
 uint8_t LoRaBridge::currentSpreadingFactor = 9;
 bool LoRaBridge::adaptiveRatesEnabled = true;
+int8_t LoRaBridge::currentTxPower = TX_POWER;
+bool LoRaBridge::adaptivePowerEnabled = true;
 int LoRaBridge::lastRSSI = 0;
 float LoRaBridge::lastSNR = 0.0;
 unsigned long LoRaBridge::txCount = 0;
@@ -261,6 +263,37 @@ int LoRaBridge::getLastRSSI() {
 
 float LoRaBridge::getLastSNR() {
     return lastSNR;
+}
+
+void LoRaBridge::setTxPower(int8_t power) {
+    // Clamp power to safe limits
+    if (power > TX_POWER) power = TX_POWER;
+    if (power < 2) power = 2; // Minimum 2 dBm
+    
+    if (currentTxPower != power) {
+        currentTxPower = power;
+        
+        // Update radio TX power
+        int state = radio.setOutputPower(currentTxPower);
+        if (state == RADIOLIB_ERR_NONE) {
+            Serial.printf("LoRaBridge: TX power set to %d dBm\n", currentTxPower);
+        } else {
+            Serial.printf("LoRaBridge: Failed to set TX power to %d dBm, error %d\n", currentTxPower, state);
+        }
+    }
+}
+
+int8_t LoRaBridge::getTxPower() {
+    return currentTxPower;
+}
+
+void LoRaBridge::setAdaptivePower(bool enabled) {
+    adaptivePowerEnabled = enabled;
+    Serial.printf("LoRaBridge: Adaptive power %s\n", enabled ? "enabled" : "disabled");
+}
+
+bool LoRaBridge::isAdaptivePowerEnabled() {
+    return adaptivePowerEnabled;
 }
 
 // Interrupt handler - keep it minimal

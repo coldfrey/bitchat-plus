@@ -6,6 +6,8 @@
 #include "config_manager.h"
 #include "bitchat_protocol.h"
 #include "connection_manager.h"
+#include "message_priority_manager.h"
+#include "power_manager.h"
 
 // Test function to verify LoRa packet format works correctly
 void testLoRaPacketFormat() {
@@ -437,6 +439,267 @@ void testConnectionManagement() {
     Serial.println();
 }
 
+// Test function to verify message prioritization functionality
+void testMessagePrioritization() {
+    Serial.println("=== Testing Message Prioritization ===");
+    
+    // Initialize message priority manager
+    Serial.println("Testing MessagePriorityManager initialization...");
+    MessagePriorityManager::init();
+    
+    // Create test messages of different priorities
+    Serial.println("Testing priority determination and queuing...");
+    
+    // Create presence message (highest priority)
+    BitchatPacket presenceMsg;
+    presenceMsg.type = MSG_TYPE_ANNOUNCE;
+    memset(presenceMsg.senderID, 0x11, 8);
+    memset(presenceMsg.recipientID, 0, 8);  // Broadcast
+    presenceMsg.ttl = 5;
+    presenceMsg.timestamp = millis();
+    const char* presenceData = "User joined";
+    presenceMsg.payload = (uint8_t*)presenceData;
+    presenceMsg.payloadLength = strlen(presenceData);
+    
+    // Create private message (high priority)
+    BitchatPacket privateMsg;
+    privateMsg.type = MSG_TYPE_MESSAGE;
+    memset(privateMsg.senderID, 0x22, 8);
+    memset(privateMsg.recipientID, 0x33, 8);  // Specific recipient
+    privateMsg.ttl = 5;
+    privateMsg.timestamp = millis();
+    const char* privateData = "Hello Alice!";
+    privateMsg.payload = (uint8_t*)privateData;
+    privateMsg.payloadLength = strlen(privateData);
+    
+    // Create broadcast message (medium priority)
+    BitchatPacket broadcastMsg;
+    broadcastMsg.type = MSG_TYPE_MESSAGE;
+    memset(broadcastMsg.senderID, 0x44, 8);
+    memset(broadcastMsg.recipientID, 0, 8);  // Broadcast
+    broadcastMsg.ttl = 5;
+    broadcastMsg.timestamp = millis();
+    const char* broadcastData = "Hello everyone!";
+    broadcastMsg.payload = (uint8_t*)broadcastData;
+    broadcastMsg.payloadLength = strlen(broadcastData);
+    
+    // Create file transfer message (lowest priority)
+    BitchatPacket fileMsg;
+    fileMsg.type = MSG_TYPE_FRAGMENT_START;
+    memset(fileMsg.senderID, 0x55, 8);
+    memset(fileMsg.recipientID, 0x66, 8);
+    fileMsg.ttl = 5;
+    fileMsg.timestamp = millis();
+    const char* fileData = "Binary data chunk 1";
+    fileMsg.payload = (uint8_t*)fileData;
+    fileMsg.payloadLength = strlen(fileData);
+    
+    // Test priority determination
+    Serial.println("Testing priority determination...");
+    MessagePriority presencePrio = MessagePriorityManager::determinePriority(presenceMsg);
+    MessagePriority privatePrio = MessagePriorityManager::determinePriority(privateMsg);
+    MessagePriority broadcastPrio = MessagePriorityManager::determinePriority(broadcastMsg);
+    MessagePriority filePrio = MessagePriorityManager::determinePriority(fileMsg);
+    
+    Serial.printf("Presence message priority: %s (%d)\n", 
+                 MessagePriorityManager::priorityToString(presencePrio), presencePrio);
+    Serial.printf("Private message priority: %s (%d)\n", 
+                 MessagePriorityManager::priorityToString(privatePrio), privatePrio);
+    Serial.printf("Broadcast message priority: %s (%d)\n", 
+                 MessagePriorityManager::priorityToString(broadcastPrio), broadcastPrio);
+    Serial.printf("File message priority: %s (%d)\n", 
+                 MessagePriorityManager::priorityToString(filePrio), filePrio);
+    
+    // Test queuing in reverse priority order to verify priority ordering
+    Serial.println("Testing priority queuing order...");
+    
+    // Queue messages in wrong order (lowest to highest priority)
+    bool queued1 = MessagePriorityManager::queueMessage(fileMsg, "Source1");
+    bool queued2 = MessagePriorityManager::queueMessage(broadcastMsg, "Source2");
+    bool queued3 = MessagePriorityManager::queueMessage(privateMsg, "Source3");
+    bool queued4 = MessagePriorityManager::queueMessage(presenceMsg, "Source4");
+    
+    Serial.printf("Queued: File=%s, Broadcast=%s, Private=%s, Presence=%s\n",
+                 queued1 ? "Yes" : "No", queued2 ? "Yes" : "No", 
+                 queued3 ? "Yes" : "No", queued4 ? "Yes" : "No");
+    
+    // Verify they come out in correct priority order
+    Serial.println("Testing priority dequeue order...");
+    PriorityQueueEntry entry;
+    int messageCount = 0;
+    
+    while (MessagePriorityManager::dequeueMessage(entry) && messageCount < 10) {
+        messageCount++;
+        Serial.printf("Dequeued message %d: %s priority (type: 0x%02X, source: %s)\n",
+                     messageCount, MessagePriorityManager::priorityToString(entry.priority),
+                     entry.packet.type, entry.sourceId.c_str());
+    }
+    
+    // Test fair queuing by flooding from one source
+    Serial.println("Testing fair queuing throttling...");
+    MessagePriorityManager::clearQueue();
+    
+    int throttledCount = 0;
+    int successCount = 0;
+    
+    // Try to queue many messages from same source rapidly
+    for (int i = 0; i < 10; i++) {
+        BitchatPacket testMsg = broadcastMsg;
+        testMsg.timestamp = millis() + i;
+        
+        if (MessagePriorityManager::queueMessage(testMsg, "FloodingSource")) {
+            successCount++;
+        } else {
+            throttledCount++;
+        }
+    }
+    
+    Serial.printf("Fair queuing test: %d messages queued, %d throttled from flooding source\n",
+                 successCount, throttledCount);
+    
+    // Test queue statistics
+    Serial.println("Testing queue statistics...");
+    MessagePriorityManager::printQueueStats();
+    
+    // Test queue limits by filling each priority queue
+    Serial.println("Testing queue limits...");
+    MessagePriorityManager::clearQueue();
+    
+    // Fill presence queue beyond limit
+    for (int i = 0; i < 15; i++) {
+        BitchatPacket testMsg = presenceMsg;
+        testMsg.timestamp = millis() + i;
+        char sourceId[32];
+        sprintf(sourceId, "PresenceSource%d", i);
+        MessagePriorityManager::queueMessage(testMsg, sourceId);
+    }
+    
+    // Check final statistics
+    Serial.println("Final queue statistics after limit testing:");
+    MessagePriorityManager::printQueueStats();
+    
+    // Test integration with MessageRouter
+    Serial.println("Testing integration with MessageRouter queuing...");
+    MessagePriorityManager::clearQueue();
+    
+    // Queue messages through MessageRouter (which uses MessagePriorityManager)
+    MessageRouter::queueForLoRa(presenceMsg);
+    MessageRouter::queueForLoRa(privateMsg);
+    MessageRouter::queueForLoRa(broadcastMsg);
+    MessageRouter::queueForLoRa(fileMsg);
+    
+    Serial.printf("Messages queued through MessageRouter: %d total\n",
+                 MessagePriorityManager::getTotalQueueDepth());
+    
+    // Clean up
+    MessagePriorityManager::clearQueue();
+    
+    Serial.println("SUCCESS: Message prioritization test completed!");
+    Serial.println("=== End Message Prioritization Test ===");
+    Serial.println();
+}
+
+// Test function to verify power management functionality
+void testPowerManagement() {
+    Serial.println("=== Testing Power Management ===");
+    
+    // Initialize power manager
+    Serial.println("Testing PowerManager initialization...");
+    PowerManager::init();
+    
+    // Test battery monitoring
+    Serial.println("Testing battery monitoring...");
+    float voltage = PowerManager::getBatteryVoltage();
+    uint8_t percentage = PowerManager::getBatteryPercentage();
+    BatteryLevel level = PowerManager::getBatteryLevel();
+    
+    Serial.printf("Battery voltage: %.2fV\n", voltage);
+    Serial.printf("Battery percentage: %d%%\n", percentage);
+    Serial.printf("Battery level: %s\n", 
+                 level == BATTERY_FULL ? "FULL" :
+                 level == BATTERY_HIGH ? "HIGH" :
+                 level == BATTERY_MEDIUM ? "MEDIUM" :
+                 level == BATTERY_LOW ? "LOW" : "CRITICAL");
+    Serial.printf("Battery low: %s\n", PowerManager::isBatteryLow() ? "Yes" : "No");
+    Serial.printf("Battery critical: %s\n", PowerManager::isBatteryCritical() ? "Yes" : "No");
+    
+    // Test power state management
+    Serial.println("Testing power state management...");
+    PowerState initialState = PowerManager::getCurrentState();
+    Serial.printf("Initial power state: %s\n", 
+                 initialState == POWER_ACTIVE ? "ACTIVE" : 
+                 initialState == POWER_IDLE ? "IDLE" :
+                 initialState == POWER_LOW_BATTERY ? "LOW_BATTERY" : "DEEP_SLEEP");
+    
+    // Test activity tracking
+    Serial.println("Testing activity tracking...");
+    PowerManager::recordActivity();
+    Serial.printf("Is idle: %s\n", PowerManager::isIdle() ? "Yes" : "No");
+    Serial.printf("Idle time: %dms\n", PowerManager::getIdleTime());
+    
+    // Test BLE advertising intervals
+    Serial.println("Testing BLE advertising intervals...");
+    uint32_t activeInterval = PowerManager::getBLEAdvertisingInterval();
+    Serial.printf("Active advertising interval: %dms\n", activeInterval);
+    
+    // Simulate idle state
+    PowerManager::setState(POWER_IDLE);
+    uint32_t idleInterval = PowerManager::getBLEAdvertisingInterval();
+    Serial.printf("Idle advertising interval: %dms\n", idleInterval);
+    
+    // Simulate low battery state
+    PowerManager::setState(POWER_LOW_BATTERY);
+    uint32_t lowBatteryInterval = PowerManager::getBLEAdvertisingInterval();
+    Serial.printf("Low battery advertising interval: %dms\n", lowBatteryInterval);
+    
+    // Test LoRa TX power optimization
+    Serial.println("Testing LoRa TX power optimization...");
+    
+    // Test different RSSI values
+    int16_t rssiValues[] = {-60, -75, -90, -105};
+    for (int i = 0; i < 4; i++) {
+        int8_t optimalPower = PowerManager::getOptimalTxPower(rssiValues[i]);
+        Serial.printf("RSSI: %d dBm -> Optimal TX Power: %d dBm\n", rssiValues[i], optimalPower);
+    }
+    
+    // Test power reduction
+    PowerManager::reduceTxPower();
+    PowerManager::restoreTxPower();
+    
+    // Test button handling simulation
+    Serial.println("Testing button handling...");
+    Serial.printf("Button held for 1000ms: %s\n", PowerManager::isButtonHeld(1000) ? "Yes" : "No");
+    
+    // Test light sleep (very short duration for testing)
+    Serial.println("Testing light sleep...");
+    unsigned long sleepStart = millis();
+    PowerManager::enterLightSleep(50); // 50ms test sleep
+    unsigned long sleepEnd = millis();
+    Serial.printf("Light sleep test: slept for ~%dms\n", sleepEnd - sleepStart);
+    
+    // Test power statistics
+    Serial.println("Testing power statistics...");
+    PowerManager::printPowerStats();
+    
+    Serial.printf("Total sleep time: %dms\n", PowerManager::getTotalSleepTime());
+    Serial.printf("Average power consumption: %.1fmA\n", PowerManager::getAveragePowerConsumption());
+    
+    // Test activity reduction check
+    Serial.println("Testing activity reduction logic...");
+    PowerManager::setState(POWER_ACTIVE);
+    Serial.printf("Should reduce activity (ACTIVE): %s\n", PowerManager::shouldReduceActivity() ? "Yes" : "No");
+    
+    PowerManager::setState(POWER_LOW_BATTERY);
+    Serial.printf("Should reduce activity (LOW_BATTERY): %s\n", PowerManager::shouldReduceActivity() ? "Yes" : "No");
+    
+    // Restore normal state
+    PowerManager::setState(POWER_ACTIVE);
+    
+    Serial.println("SUCCESS: Power management test completed!");
+    Serial.println("=== End Power Management Test ===");
+    Serial.println();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -462,6 +725,7 @@ void setup() {
     
     // Initialize modules
     // ConfigManager::init();
+    PowerManager::init();   // Initialize power management first
     MessageRouter::init();  // Initialize message router first
     BLEMesh::init();
     LoRaBridge::init();     // Initialize LoRa radio
@@ -481,12 +745,19 @@ void setup() {
     // Test connection management system
     testConnectionManagement();
     
+    // Test message prioritization system
+    testMessagePrioritization();
+    
+    // Test power management system
+    testPowerManagement();
+    
     digitalWrite(LED_PIN, LOW);  // Turn off LED after startup
     Serial.println("BitChat Repeater ready");
 }
 
 void loop() {
     // Main loop processing
+    PowerManager::process();   // Process power management first
     BLEMesh::process();
     LoRaBridge::process();     // Process LoRa radio
     MessageRouter::process();  // Process deduplication cleanup

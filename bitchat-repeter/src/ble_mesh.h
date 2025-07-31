@@ -26,6 +26,7 @@ public:
     static void sendData(const uint8_t* data, size_t length);
     static int getConnectedClientCount();
     static void setConnectionState(uint16_t connectionHandle, const ConnectionState& state);
+    static void setAdvertisingInterval(uint32_t intervalMs);
     
 private:
     // Server (Peripheral) components - for iOS device connections only

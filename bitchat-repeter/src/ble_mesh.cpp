@@ -113,6 +113,37 @@ void BLEMesh::setConnectionState(uint16_t connectionHandle, const ConnectionStat
     connectionStates[connectionHandle] = state;
 }
 
+void BLEMesh::setAdvertisingInterval(uint32_t intervalMs) {
+    if (pAdvertising) {
+        // NimBLE uses units of 0.625ms, so convert from milliseconds
+        // Min: 20ms (32 units), Max: 10.24s (16384 units)
+        uint32_t intervalUnits = intervalMs / 0.625;
+        
+        // Clamp to valid range
+        if (intervalUnits < 32) intervalUnits = 32;       // 20ms minimum
+        if (intervalUnits > 16384) intervalUnits = 16384; // 10.24s maximum
+        
+        // Stop advertising before changing interval
+        bool wasAdvertising = pAdvertising->isAdvertising();
+        if (wasAdvertising) {
+            pAdvertising->stop();
+        }
+        
+        // Set new interval (min and max the same for fixed interval)
+        pAdvertising->setMinInterval(intervalUnits);
+        pAdvertising->setMaxInterval(intervalUnits);
+        
+        // Restart advertising if it was running
+        if (wasAdvertising) {
+            pAdvertising->start();
+        }
+        
+        Serial.printf("BLEMesh: Advertising interval set to %dms (%d units)\n", intervalMs, intervalUnits);
+    } else {
+        Serial.println("BLEMesh: Cannot set advertising interval - not initialized");
+    }
+}
+
 void BLEMesh::generatePeerID() {
     // Get MAC address and create 8-character hex peer ID
     uint8_t mac[6];

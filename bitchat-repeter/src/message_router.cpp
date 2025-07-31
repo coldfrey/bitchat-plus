@@ -1,6 +1,7 @@
 #include "message_router.h"
 #include "lora_bridge.h"
 #include "ble_mesh.h"
+#include "message_priority_manager.h"
 #include <Arduino.h>
 
 // Static member definitions
@@ -87,13 +88,21 @@ void MessageCache::cleanupExpired() {
 void MessageRouter::init() {
     Serial.println("Message Router: Initializing...");
     lastCleanup = millis();
+    
+    // Initialize message priority manager
+    MessagePriorityManager::init();
+    
     Serial.printf("Message Router: Deduplication cache initialized (capacity: %d messages)\n", 1000);
+    Serial.println("Message Router: Priority-based queuing enabled");
 }
 
 void MessageRouter::process() {
     unsigned long now = millis();
     
-    // Process LoRa transmission queue
+    // Process message priority manager
+    MessagePriorityManager::process();
+    
+    // Process LoRa transmission queue (now using priority system)
     processLoRaQueue();
     
     // Perform periodic cleanup every 30 seconds
@@ -278,66 +287,66 @@ bool MessageRouter::shouldForward(const BitchatPacket& packet, uint16_t sourceCo
 
 // LoRa transmission queue implementation
 bool MessageRouter::queueForLoRa(const BitchatPacket& packet) {
-    // Check queue capacity
-    if (loraQueue.size() >= MAX_LORA_QUEUE_SIZE) {
-        Serial.printf("Message Router: LoRa queue full (%d/%d), dropping message\n", 
-                     loraQueue.size(), MAX_LORA_QUEUE_SIZE);
-        return false;
+    // Use MessagePriorityManager for intelligent queuing
+    String sourceId = MessagePriorityManager::extractSourceId(packet);
+    
+    bool queued = MessagePriorityManager::queueMessage(packet, sourceId);
+    
+    if (queued) {
+        Serial.printf("Message Router: Message queued with priority system (total queue: %d)\n",
+                     MessagePriorityManager::getTotalQueueDepth());
+    } else {
+        Serial.printf("Message Router: Message dropped by priority system (queue full or throttled)\n");
     }
     
-    // Create queue entry
-    LoRaQueueEntry entry;
-    entry.packet = packet;
-    entry.scheduleTime = millis() + getRandomDelay(); // Add random delay
-    entry.retryCount = 0;
-    
-    // Copy packet payload data to our storage
-    copyPacketData(entry, packet);
-    
-    // Add to queue
-    loraQueue.push_back(entry);
-    
-    Serial.printf("Message Router: Queued message for LoRa transmission (delay: %dms, queue: %d/%d)\n",
-                 (int)(entry.scheduleTime - millis()), loraQueue.size(), MAX_LORA_QUEUE_SIZE);
-    
-    return true;
+    return queued;
 }
 
 void MessageRouter::processLoRaQueue() {
-    if (loraQueue.empty()) {
-        return;
-    }
+    // Process messages from priority queue
+    PriorityQueueEntry entry;
     
-    unsigned long now = millis();
-    
-    // Process entries that are ready to transmit
-    for (auto it = loraQueue.begin(); it != loraQueue.end(); ) {
-        if (now >= it->scheduleTime) {
-            Serial.printf("Message Router: Transmitting queued LoRa message (type: 0x%02X, TTL: %d)\n",
-                         it->packet.type, it->packet.ttl);
+    // Try to dequeue and transmit highest priority message that's ready
+    while (MessagePriorityManager::dequeueMessage(entry)) {
+        unsigned long now = millis();
+        
+        // Check if message is ready to transmit (respecting scheduling delay)
+        if (now >= entry.scheduleTime) {
+            Serial.printf("Message Router: Transmitting %s message (type: 0x%02X, TTL: %d, source: %s)\n",
+                         MessagePriorityManager::priorityToString(entry.priority),
+                         entry.packet.type, entry.packet.ttl, entry.sourceId.c_str());
             
             // Transmit via LoRa bridge
-            bool success = LoRaBridge::transmit(it->packet);
+            bool success = LoRaBridge::transmit(entry.packet);
             
             if (success) {
-                // Remove from queue after successful transmission
-                it = loraQueue.erase(it);
+                Serial.printf("Message Router: Successfully transmitted %s message\n",
+                             MessagePriorityManager::priorityToString(entry.priority));
+                // Message transmitted successfully, continue to next
             } else {
-                // Increment retry count and reschedule
-                it->retryCount++;
-                if (it->retryCount >= 3) {
-                    Serial.printf("Message Router: Dropping message after %d failed attempts\n", it->retryCount);
-                    it = loraQueue.erase(it);
+                // Increment retry count and reschedule if not exceeded limit
+                entry.retryCount++;
+                if (entry.retryCount >= 3) {
+                    Serial.printf("Message Router: Dropping %s message after %d failed attempts\n",
+                                 MessagePriorityManager::priorityToString(entry.priority), entry.retryCount);
                 } else {
-                    // Retry with exponential backoff
-                    it->scheduleTime = now + (100 << it->retryCount); // 100ms, 200ms, 400ms
-                    Serial.printf("Message Router: Rescheduling transmission (attempt %d) in %dms\n", 
-                                 it->retryCount + 1, (100 << it->retryCount));
-                    ++it;
+                    // Retry with exponential backoff - re-queue the message
+                    entry.scheduleTime = now + (100 << entry.retryCount); // 100ms, 200ms, 400ms
+                    Serial.printf("Message Router: Rescheduling %s message (attempt %d) in %dms\n",
+                                 MessagePriorityManager::priorityToString(entry.priority),
+                                 entry.retryCount + 1, (100 << entry.retryCount));
+                    
+                    // Re-queue the message for retry (this is simplified - in production we'd need a retry queue)
+                    MessagePriorityManager::queueMessage(entry.packet, entry.sourceId);
                 }
             }
+            
+            // Only process one message per cycle to avoid blocking
+            break;
         } else {
-            ++it;
+            // Message not ready yet, re-queue it (simplified approach)
+            MessagePriorityManager::queueMessage(entry.packet, entry.sourceId);
+            break;
         }
     }
 }
