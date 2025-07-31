@@ -63,6 +63,65 @@ private:
     static uint8_t calculateLinkQuality(int avgRSSI);
 };
 
+// Route table entry for mesh routing
+struct RouteEntry {
+    uint32_t destination;       // Destination repeater ID
+    uint32_t nextHop;          // Next hop repeater ID
+    uint8_t hopCount;          // Number of hops to destination
+    uint32_t sequenceNumber;   // Sequence number for freshness
+    unsigned long lastUsed;    // Last time route was used
+    unsigned long expiry;      // When route expires
+    bool isValid;             // Route validity flag
+    
+    RouteEntry() : destination(0), nextHop(0), hopCount(255), sequenceNumber(0),
+                  lastUsed(0), expiry(0), isValid(false) {}
+    
+    RouteEntry(uint32_t dest, uint32_t next, uint8_t hops, uint32_t seqNum) :
+        destination(dest), nextHop(next), hopCount(hops), sequenceNumber(seqNum),
+        lastUsed(millis()), expiry(millis() + 600000), isValid(true) {} // 10-minute timeout
+};
+
+// Route request entry for tracking ongoing route discoveries
+struct RouteRequestEntry {
+    uint32_t requestId;        // Unique request ID
+    uint32_t originator;       // Original requester
+    uint32_t destination;      // Target destination
+    unsigned long timestamp;   // When request was initiated
+    bool replied;             // Whether we've replied to this request
+    
+    RouteRequestEntry() : requestId(0), originator(0), destination(0), 
+                         timestamp(0), replied(false) {}
+    
+    RouteRequestEntry(uint32_t reqId, uint32_t orig, uint32_t dest) :
+        requestId(reqId), originator(orig), destination(dest),
+        timestamp(millis()), replied(false) {}
+};
+
+class RouteTable {
+public:
+    static void init();
+    static void addRoute(uint32_t destination, uint32_t nextHop, uint8_t hopCount, uint32_t sequenceNumber);
+    static RouteEntry* findRoute(uint32_t destination);
+    static bool removeRoute(uint32_t destination);
+    static void cleanupExpiredRoutes();
+    static void printRouteTable();
+    static size_t getRouteCount();
+    
+    // Route discovery management
+    static bool isRouteRequestPending(uint32_t destination);
+    static void addRouteRequest(uint32_t requestId, uint32_t originator, uint32_t destination);
+    static RouteRequestEntry* findRouteRequest(uint32_t requestId);
+    static void cleanupExpiredRequests();
+    static uint32_t generateRequestId();
+    
+private:
+    static std::map<uint32_t, RouteEntry> routes;
+    static std::map<uint32_t, RouteRequestEntry> pendingRequests;
+    static const unsigned long ROUTE_TIMEOUT_MS = 600000;      // 10 minutes
+    static const unsigned long REQUEST_TIMEOUT_MS = 30000;     // 30 seconds
+    static uint32_t nextRequestId;
+};
+
 class LoRaBridge {
 public:
     static void init();
@@ -77,6 +136,14 @@ public:
     // Neighbor discovery
     static void sendNeighborAnnouncement();
     static void handleNeighborAnnouncement(const LoRaPacket& packet, int rssi);
+    
+    // Mesh routing
+    static bool routeDataPacket(const LoRaPacket& packet);
+    static void initiateRouteDiscovery(uint32_t destination);
+    static void handleRouteRequest(const LoRaPacket& packet, int rssi);
+    static void handleRouteReply(const LoRaPacket& packet, int rssi);
+    static void sendRouteRequest(uint32_t destination);
+    static void sendRouteReply(uint32_t destination, uint32_t originator, uint32_t requestId, uint8_t hopCount);
     
     // Status and statistics
     static bool isReceiving();
@@ -103,6 +170,9 @@ private:
     static unsigned long totalAirTimeMs;
     static const unsigned long DUTY_CYCLE_WINDOW_MS = 3600000; // 1 hour
     static const unsigned long MAX_AIRTIME_MS = 36000;         // 36 seconds per hour
+    
+    // Routing state
+    static uint32_t ownSequenceNumber;
     
     // Statistics
     static int lastRSSI;

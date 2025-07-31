@@ -5,6 +5,11 @@
 // NeighborTable static member definitions
 std::map<uint32_t, NeighborEntry> NeighborTable::neighbors;
 
+// RouteTable static member definitions
+std::map<uint32_t, RouteEntry> RouteTable::routes;
+std::map<uint32_t, RouteRequestEntry> RouteTable::pendingRequests;
+uint32_t RouteTable::nextRequestId = 1;
+
 // LoRaBridge static member definitions
 SX1262 LoRaBridge::radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
 bool LoRaBridge::initialized = false;
@@ -16,6 +21,7 @@ unsigned long LoRaBridge::lastTransmission = 0;
 bool LoRaBridge::channelBusy = false;
 unsigned long LoRaBridge::dutyCycleStartTime = 0;
 unsigned long LoRaBridge::totalAirTimeMs = 0;
+uint32_t LoRaBridge::ownSequenceNumber = 1;
 int LoRaBridge::lastRSSI = 0;
 float LoRaBridge::lastSNR = 0.0;
 unsigned long LoRaBridge::txCount = 0;
@@ -37,6 +43,10 @@ const unsigned long LoRaBridge::MAX_BACKOFF_MS;
 const uint8_t LoRaBridge::MAX_RETRIES;
 const unsigned long LoRaBridge::DUTY_CYCLE_WINDOW_MS;
 const unsigned long LoRaBridge::MAX_AIRTIME_MS;
+
+// RouteTable constants
+const unsigned long RouteTable::ROUTE_TIMEOUT_MS;
+const unsigned long RouteTable::REQUEST_TIMEOUT_MS;
 
 void LoRaBridge::init() {
     Serial.println("LoRa Bridge: Initializing SX1262 radio...");
@@ -70,6 +80,9 @@ void LoRaBridge::init() {
     
     // Initialize neighbor table
     NeighborTable::init();
+    
+    // Initialize route table
+    RouteTable::init();
     
     // Initialize duty cycle tracking
     dutyCycleStartTime = millis();
@@ -116,6 +129,14 @@ void LoRaBridge::process() {
     if (now - lastNeighborCleanup > 120000) {
         lastNeighborCleanup = now;
         NeighborTable::cleanupStaleNeighbors();
+    }
+    
+    // Clean up expired routes every 5 minutes
+    static unsigned long lastRouteCleanup = 0;
+    if (now - lastRouteCleanup > 300000) {
+        lastRouteCleanup = now;
+        RouteTable::cleanupExpiredRoutes();
+        RouteTable::cleanupExpiredRequests();
     }
     
     // Process transmission queue
@@ -330,14 +351,20 @@ void LoRaBridge::handleReceivedLoRaPacket(const uint8_t* buffer, size_t received
             break;
             
         case LORA_PKT_DATA:
-            // Data packet contains a BitChat packet in the payload
-            Serial.println("LoRa Bridge: Received DATA packet - not yet implemented");
+            // Route data packet to its destination
+            routeDataPacket(loraPacket);
             break;
             
         case LORA_PKT_ROUTE_REQUEST:
+            handleRouteRequest(loraPacket, lastRSSI);
+            break;
+            
         case LORA_PKT_ROUTE_REPLY:
+            handleRouteReply(loraPacket, lastRSSI);
+            break;
+            
         case LORA_PKT_MESH_ACK:
-            Serial.printf("LoRa Bridge: Received packet type 0x%02X - not yet implemented\n", loraPacket.type);
+            Serial.printf("LoRa Bridge: Received MESH_ACK packet - not yet implemented\n");
             break;
             
         default:
@@ -732,4 +759,453 @@ unsigned long LoRaBridge::getRandomBackoff(uint8_t retryCount) {
     unsigned long jitter = random(0, backoffTime / 2);
     
     return backoffTime + jitter;
+}
+
+// ================ RouteTable Implementation ================
+
+void RouteTable::init() {
+    routes.clear();
+    pendingRequests.clear();
+    nextRequestId = 1;
+    Serial.println("RouteTable: Initialized");
+}
+
+void RouteTable::addRoute(uint32_t destination, uint32_t nextHop, uint8_t hopCount, uint32_t sequenceNumber) {
+    unsigned long now = millis();
+    
+    auto it = routes.find(destination);
+    if (it != routes.end()) {
+        // Update existing route if this one is fresher or has better hop count
+        RouteEntry& existing = it->second;
+        bool isFresher = (sequenceNumber > existing.sequenceNumber);
+        bool isBetter = (sequenceNumber == existing.sequenceNumber && hopCount < existing.hopCount);
+        
+        if (isFresher || isBetter) {
+            existing.nextHop = nextHop;
+            existing.hopCount = hopCount;
+            existing.sequenceNumber = sequenceNumber;
+            existing.lastUsed = now;
+            existing.expiry = now + ROUTE_TIMEOUT_MS;
+            existing.isValid = true;
+            
+            Serial.printf("RouteTable: Updated route to %08X via %08X (hops=%d, seq=%lu)\n",
+                         destination, nextHop, hopCount, sequenceNumber);
+        }
+    } else {
+        // Add new route
+        RouteEntry entry(destination, nextHop, hopCount, sequenceNumber);
+        routes[destination] = entry;
+        
+        Serial.printf("RouteTable: Added route to %08X via %08X (hops=%d, seq=%lu)\n",
+                     destination, nextHop, hopCount, sequenceNumber);
+    }
+}
+
+RouteEntry* RouteTable::findRoute(uint32_t destination) {
+    auto it = routes.find(destination);
+    if (it != routes.end() && it->second.isValid && millis() < it->second.expiry) {
+        it->second.lastUsed = millis(); // Update last used time
+        return &it->second;
+    }
+    return nullptr;
+}
+
+bool RouteTable::removeRoute(uint32_t destination) {
+    auto it = routes.find(destination);
+    if (it != routes.end()) {
+        Serial.printf("RouteTable: Removed route to %08X\n", destination);
+        routes.erase(it);
+        return true;
+    }
+    return false;
+}
+
+void RouteTable::cleanupExpiredRoutes() {
+    unsigned long now = millis();
+    auto it = routes.begin();
+    
+    int cleanedCount = 0;
+    while (it != routes.end()) {
+        if (now > it->second.expiry || !it->second.isValid) {
+            Serial.printf("RouteTable: Removing expired route to %08X\n", it->second.destination);
+            it = routes.erase(it);
+            cleanedCount++;
+        } else {
+            ++it;
+        }
+    }
+    
+    if (cleanedCount > 0) {
+        Serial.printf("RouteTable: Cleaned up %d expired routes\n", cleanedCount);
+    }
+}
+
+void RouteTable::printRouteTable() {
+    Serial.printf("=== Route Table (%d routes) ===\n", routes.size());
+    Serial.println("Destination  NextHop      Hops SeqNum     LastUsed  Expires   Valid");
+    Serial.println("------------ ------------ ---- ---------- --------- --------- -----");
+    
+    unsigned long now = millis();
+    for (const auto& pair : routes) {
+        const RouteEntry& entry = pair.second;
+        unsigned long ageMs = now - entry.lastUsed;
+        unsigned long expiresMs = (entry.expiry > now) ? (entry.expiry - now) : 0;
+        
+        Serial.printf("%08X     %08X     %4d %10lu %7lums %7lums %s\n",
+                     entry.destination, entry.nextHop, entry.hopCount, entry.sequenceNumber,
+                     ageMs, expiresMs, entry.isValid ? "Yes" : "No");
+    }
+    Serial.println("===========================");
+}
+
+size_t RouteTable::getRouteCount() {
+    return routes.size();
+}
+
+bool RouteTable::isRouteRequestPending(uint32_t destination) {
+    // Check if we have any pending requests for this destination
+    for (const auto& pair : pendingRequests) {
+        if (pair.second.destination == destination && !pair.second.replied) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RouteTable::addRouteRequest(uint32_t requestId, uint32_t originator, uint32_t destination) {
+    RouteRequestEntry entry(requestId, originator, destination);
+    pendingRequests[requestId] = entry;
+    
+    Serial.printf("RouteTable: Added route request %lu from %08X to %08X\n",
+                 requestId, originator, destination);
+}
+
+RouteRequestEntry* RouteTable::findRouteRequest(uint32_t requestId) {
+    auto it = pendingRequests.find(requestId);
+    return (it != pendingRequests.end()) ? &it->second : nullptr;
+}
+
+void RouteTable::cleanupExpiredRequests() {
+    unsigned long now = millis();
+    auto it = pendingRequests.begin();
+    
+    int cleanedCount = 0;
+    while (it != pendingRequests.end()) {
+        if (now - it->second.timestamp > REQUEST_TIMEOUT_MS) {
+            Serial.printf("RouteTable: Removing expired request %lu\n", it->second.requestId);
+            it = pendingRequests.erase(it);
+            cleanedCount++;
+        } else {
+            ++it;
+        }
+    }
+    
+    if (cleanedCount > 0) {
+        Serial.printf("RouteTable: Cleaned up %d expired requests\n", cleanedCount);
+    }
+}
+
+uint32_t RouteTable::generateRequestId() {
+    return nextRequestId++;
+}
+
+// ================ LoRaBridge Mesh Routing Implementation ================
+
+bool LoRaBridge::routeDataPacket(const LoRaPacket& packet) {
+    uint32_t myId = getRepeaterID();
+    
+    // Check if packet is for us
+    if (packet.destRepeater == myId || packet.destRepeater == LORA_DEST_BROADCAST) {
+        // Extract BitChat packet and forward to BLE or process locally
+        Serial.printf("LoRa Bridge: Received data packet for us (dest=%08X)\n", packet.destRepeater);
+        
+        // TODO: Forward BitChat packet payload to MessageRouter for BLE transmission
+        // For now, just log the reception
+        Serial.printf("LoRa Bridge: Data packet payload (%d bytes) - forwarding not yet implemented\n", 
+                     packet.payloadLen);
+        return true;
+    }
+    
+    // Check TTL (hopCount vs maxHops)
+    if (packet.hopCount >= packet.maxHops) {
+        Serial.printf("LoRa Bridge: Dropping data packet - TTL exceeded (hops=%d, max=%d)\n",
+                     packet.hopCount, packet.maxHops);
+        return false;
+    }
+    
+    // Look up route to destination
+    RouteEntry* route = RouteTable::findRoute(packet.destRepeater);
+    
+    if (route) {
+        // Forward packet using known route
+        LoRaPacket forwardPacket = packet;
+        forwardPacket.srcRepeater = packet.srcRepeater; // Keep original source
+        forwardPacket.nextHop = route->nextHop;
+        forwardPacket.hopCount = packet.hopCount + 1;
+        
+        Serial.printf("LoRa Bridge: Forwarding data packet to %08X via %08X (hop %d)\n",
+                     packet.destRepeater, route->nextHop, forwardPacket.hopCount);
+        
+        return queueLoRaPacket(forwardPacket);
+    } else {
+        // No route found, initiate route discovery
+        Serial.printf("LoRa Bridge: No route to %08X, initiating discovery\n", packet.destRepeater);
+        initiateRouteDiscovery(packet.destRepeater);
+        
+        // For now, drop the packet (in a real implementation, we'd queue it)
+        Serial.println("LoRa Bridge: Dropping data packet - no route available");
+        return false;
+    }
+}
+
+void LoRaBridge::initiateRouteDiscovery(uint32_t destination) {
+    // Check if we already have a pending request for this destination
+    if (RouteTable::isRouteRequestPending(destination)) {
+        Serial.printf("LoRa Bridge: Route discovery already pending for %08X\n", destination);
+        return;
+    }
+    
+    sendRouteRequest(destination);
+}
+
+void LoRaBridge::sendRouteRequest(uint32_t destination) {
+    uint32_t myId = getRepeaterID();
+    uint32_t requestId = RouteTable::generateRequestId();
+    
+    // Add to pending requests
+    RouteTable::addRouteRequest(requestId, myId, destination);
+    
+    // Create ROUTE_REQUEST packet
+    LoRaPacket packet;
+    packet.type = LORA_PKT_ROUTE_REQUEST;
+    packet.srcRepeater = myId;
+    packet.destRepeater = LORA_DEST_BROADCAST;
+    packet.nextHop = LORA_DEST_BROADCAST;
+    packet.hopCount = 0;
+    packet.maxHops = 5; // Limit route discovery flooding
+    packet.seqNum = ownSequenceNumber++;
+    
+    // Create route request payload
+    struct __attribute__((packed)) RouteRequestPayload {
+        uint32_t requestId;
+        uint32_t originator;
+        uint32_t destination;
+        uint32_t sequenceNumber;
+        uint8_t hopCount;
+    } payload;
+    
+    payload.requestId = requestId;
+    payload.originator = myId;
+    payload.destination = destination;
+    payload.sequenceNumber = ownSequenceNumber;
+    payload.hopCount = 0;
+    
+    packet.payloadLen = sizeof(payload);
+    memcpy(packet.payload, &payload, sizeof(payload));
+    
+    Serial.printf("LoRa Bridge: Sending ROUTE_REQUEST for %08X (reqId=%lu)\n", destination, requestId);
+    queueLoRaPacket(packet);
+}
+
+void LoRaBridge::handleRouteRequest(const LoRaPacket& packet, int rssi) {
+    if (packet.payloadLen < 17) { // Minimum size for route request
+        Serial.println("LoRa Bridge: Invalid ROUTE_REQUEST - payload too small");
+        return;
+    }
+    
+    struct __attribute__((packed)) RouteRequestPayload {
+        uint32_t requestId;
+        uint32_t originator;
+        uint32_t destination;
+        uint32_t sequenceNumber;
+        uint8_t hopCount;
+    };
+    
+    const RouteRequestPayload* payload = 
+        reinterpret_cast<const RouteRequestPayload*>(packet.payload);
+    
+    uint32_t myId = getRepeaterID();
+    
+    // Don't process our own requests
+    if (payload->originator == myId) {
+        return;
+    }
+    
+    // Check if we've already seen this request
+    RouteRequestEntry* existingRequest = RouteTable::findRouteRequest(payload->requestId);
+    if (existingRequest && existingRequest->replied) {
+        Serial.printf("LoRa Bridge: Already replied to request %lu, ignoring\n", payload->requestId);
+        return;
+    }
+    
+    // Add reverse route to originator
+    RouteTable::addRoute(payload->originator, packet.srcRepeater, payload->hopCount + 1, payload->sequenceNumber);
+    
+    // Check if we are the destination
+    if (payload->destination == myId) {
+        // Send ROUTE_REPLY back to originator
+        Serial.printf("LoRa Bridge: We are destination for request %lu, sending reply\n", payload->requestId);
+        sendRouteReply(payload->destination, payload->originator, payload->requestId, 0);
+        
+        // Mark request as replied
+        if (existingRequest) {
+            existingRequest->replied = true;
+        } else {
+            RouteTable::addRouteRequest(payload->requestId, payload->originator, payload->destination);
+            RouteRequestEntry* newRequest = RouteTable::findRouteRequest(payload->requestId);
+            if (newRequest) {
+                newRequest->replied = true;
+            }
+        }
+        return;
+    }
+    
+    // Check if we have a route to the destination
+    RouteEntry* route = RouteTable::findRoute(payload->destination);
+    if (route) {
+        // Send ROUTE_REPLY back to originator
+        Serial.printf("LoRa Bridge: Have route to %08X, sending reply (reqId=%lu)\n", 
+                     payload->destination, payload->requestId);
+        sendRouteReply(payload->destination, payload->originator, payload->requestId, route->hopCount);
+        
+        // Mark request as replied
+        if (existingRequest) {
+            existingRequest->replied = true;
+        } else {
+            RouteTable::addRouteRequest(payload->requestId, payload->originator, payload->destination);
+            RouteRequestEntry* newRequest = RouteTable::findRouteRequest(payload->requestId);
+            if (newRequest) {
+                newRequest->replied = true;
+            }
+        }
+        return;
+    }
+    
+    // Forward the request if TTL allows
+    if (packet.hopCount < packet.maxHops) {
+        LoRaPacket forwardPacket = packet;
+        forwardPacket.srcRepeater = myId;
+        forwardPacket.hopCount = packet.hopCount + 1;
+        
+        // Update payload hop count
+        RouteRequestPayload forwardPayload = *payload;
+        forwardPayload.hopCount = packet.hopCount + 1;
+        memcpy(forwardPacket.payload, &forwardPayload, sizeof(forwardPayload));
+        
+        Serial.printf("LoRa Bridge: Forwarding ROUTE_REQUEST for %08X (reqId=%lu, hop=%d)\n",
+                     payload->destination, payload->requestId, forwardPacket.hopCount);
+        queueLoRaPacket(forwardPacket);
+        
+        // Track that we've seen this request (but haven't replied)
+        if (!existingRequest) {
+            RouteTable::addRouteRequest(payload->requestId, payload->originator, payload->destination);
+        }
+    } else {
+        Serial.printf("LoRa Bridge: Dropping ROUTE_REQUEST - TTL exceeded (hop=%d, max=%d)\n",
+                     packet.hopCount, packet.maxHops);
+    }
+}
+
+void LoRaBridge::sendRouteReply(uint32_t destination, uint32_t originator, uint32_t requestId, uint8_t hopCount) {
+    uint32_t myId = getRepeaterID();
+    
+    // Look up route back to originator
+    RouteEntry* route = RouteTable::findRoute(originator);
+    if (!route) {
+        Serial.printf("LoRa Bridge: No route back to originator %08X for ROUTE_REPLY\n", originator);
+        return;
+    }
+    
+    // Create ROUTE_REPLY packet
+    LoRaPacket packet;
+    packet.type = LORA_PKT_ROUTE_REPLY;
+    packet.srcRepeater = myId;
+    packet.destRepeater = originator;
+    packet.nextHop = route->nextHop;
+    packet.hopCount = 0;
+    packet.maxHops = 10; // Allow longer path for replies
+    packet.seqNum = ownSequenceNumber++;
+    
+    // Create route reply payload
+    struct __attribute__((packed)) RouteReplyPayload {
+        uint32_t requestId;
+        uint32_t originator;
+        uint32_t destination;
+        uint32_t sequenceNumber;
+        uint8_t hopCount;
+    } payload;
+    
+    payload.requestId = requestId;
+    payload.originator = originator;
+    payload.destination = destination;
+    payload.sequenceNumber = ownSequenceNumber;
+    payload.hopCount = hopCount;
+    
+    packet.payloadLen = sizeof(payload);
+    memcpy(packet.payload, &payload, sizeof(payload));
+    
+    Serial.printf("LoRa Bridge: Sending ROUTE_REPLY to %08X for dest %08X (reqId=%lu, hops=%d)\n",
+                 originator, destination, requestId, hopCount);
+    queueLoRaPacket(packet);
+}
+
+void LoRaBridge::handleRouteReply(const LoRaPacket& packet, int rssi) {
+    if (packet.payloadLen < 17) { // Minimum size for route reply
+        Serial.println("LoRa Bridge: Invalid ROUTE_REPLY - payload too small");
+        return;
+    }
+    
+    struct __attribute__((packed)) RouteReplyPayload {
+        uint32_t requestId;
+        uint32_t originator;
+        uint32_t destination;
+        uint32_t sequenceNumber;
+        uint8_t hopCount;
+    };
+    
+    const RouteReplyPayload* payload = 
+        reinterpret_cast<const RouteReplyPayload*>(packet.payload);
+    
+    uint32_t myId = getRepeaterID();
+    
+    // Add reverse route to the packet source
+    RouteTable::addRoute(packet.srcRepeater, packet.srcRepeater, 1, packet.seqNum);
+    
+    // Check if this reply is for us
+    if (payload->originator == myId) {
+        // This is a reply to our route request
+        Serial.printf("LoRa Bridge: Received ROUTE_REPLY for our request %lu to %08X (hops=%d)\n",
+                     payload->requestId, payload->destination, payload->hopCount + packet.hopCount);
+        
+        // Add route to destination
+        RouteTable::addRoute(payload->destination, packet.srcRepeater, 
+                           payload->hopCount + packet.hopCount + 1, payload->sequenceNumber);
+        return;
+    }
+    
+    // Check if packet is destined for us
+    if (packet.destRepeater == myId) {
+        Serial.printf("LoRa Bridge: Received ROUTE_REPLY destined for us but not our request - dropping\n");
+        return;
+    }
+    
+    // Forward the reply toward its destination
+    RouteEntry* route = RouteTable::findRoute(packet.destRepeater);
+    if (route && packet.hopCount < packet.maxHops) {
+        LoRaPacket forwardPacket = packet;
+        forwardPacket.srcRepeater = myId;
+        forwardPacket.nextHop = route->nextHop;
+        forwardPacket.hopCount = packet.hopCount + 1;
+        
+        // Update payload hop count
+        RouteReplyPayload forwardPayload = *payload;
+        forwardPayload.hopCount = payload->hopCount + packet.hopCount + 1;
+        memcpy(forwardPacket.payload, &forwardPayload, sizeof(forwardPayload));
+        
+        Serial.printf("LoRa Bridge: Forwarding ROUTE_REPLY to %08X via %08X (hop=%d)\n",
+                     packet.destRepeater, route->nextHop, forwardPacket.hopCount);
+        queueLoRaPacket(forwardPacket);
+    } else {
+        Serial.printf("LoRa Bridge: Cannot forward ROUTE_REPLY - no route to %08X\n", packet.destRepeater);
+    }
 }

@@ -163,6 +163,48 @@ void testTransmissionSystem() {
     Serial.println();
 }
 
+// Test function to verify mesh routing functionality
+void testMeshRouting() {
+    Serial.println("=== Testing Mesh Routing ===");
+    
+    // Test route table operations
+    Serial.println("Testing RouteTable operations...");
+    
+    // Add test routes
+    RouteTable::addRoute(0x12345678, 0xAABBCCDD, 3, 100);
+    RouteTable::addRoute(0xABCDEF00, 0x11223344, 2, 200);
+    RouteTable::addRoute(0x55667788, 0xAABBCCDD, 5, 150);
+    
+    // Test route lookup
+    RouteEntry* route = RouteTable::findRoute(0x12345678);
+    if (route) {
+        Serial.printf("Found route to %08X via %08X (hops=%d, seq=%lu)\n",
+                     route->destination, route->nextHop, route->hopCount, route->sequenceNumber);
+    } else {
+        Serial.println("ERROR: Failed to find test route");
+    }
+    
+    // Print route table
+    RouteTable::printRouteTable();
+    
+    // Test route discovery simulation
+    Serial.println("Testing route discovery...");
+    uint32_t testDestination = 0x99887766;
+    LoRaBridge::initiateRouteDiscovery(testDestination);
+    
+    // Test route request ID generation
+    for (int i = 0; i < 3; i++) {
+        uint32_t reqId = RouteTable::generateRequestId();
+        Serial.printf("Generated request ID: %lu\n", reqId);
+    }
+    
+    Serial.printf("Route count: %d\n", RouteTable::getRouteCount());
+    
+    Serial.println("SUCCESS: Mesh routing test completed!");
+    Serial.println("=== End Mesh Routing Test ===");
+    Serial.println();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -194,6 +236,9 @@ void setup() {
     
     // Test transmission system after initialization
     testTransmissionSystem();
+    
+    // Test mesh routing system
+    testMeshRouting();
     
     digitalWrite(LED_PIN, LOW);  // Turn off LED after startup
     Serial.println("BitChat Repeater ready");
