@@ -2,6 +2,7 @@
 #include "lora_bridge.h"
 #include "ble_mesh.h"
 #include "message_priority_manager.h"
+#include "loop_prevention_test.h"
 #include <Arduino.h>
 
 // Static member definitions
@@ -166,6 +167,9 @@ void MessageRouter::handleBLEMessage(const BitchatPacket& packet, uint16_t conne
     Serial.printf("Message Router: Processing BLE message type 0x%02X from connection %d\n", 
                  packet.type, connectionHandle);
     
+    // Handle loop prevention test messages
+    LoopPreventionTest::handleReceivedTestMessage(packet, "BLE-" + String(connectionHandle));
+    
     // Check for duplicates
     if (isDuplicate(packet)) {
         Serial.printf("Message Router: Dropping duplicate BLE message (ID: 0x%08X)\n", 
@@ -201,6 +205,9 @@ void MessageRouter::handleBLEMessage(const BitchatPacket& packet, uint16_t conne
 
 void MessageRouter::handleLoRaMessage(const BitchatPacket& packet) {
     Serial.printf("Message Router: Processing LoRa message type 0x%02X\n", packet.type);
+    
+    // Handle loop prevention test messages
+    LoopPreventionTest::handleReceivedTestMessage(packet, "LoRa");
     
     // Check for duplicates
     if (isDuplicate(packet)) {

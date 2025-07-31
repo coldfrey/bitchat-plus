@@ -10,6 +10,7 @@
 #include "power_manager.h"
 #include "status_reporter.h"
 #include "serial_debug.h"
+#include "loop_prevention_test.h"
 
 // Test function to verify LoRa packet format works correctly
 void testLoRaPacketFormat() {
@@ -730,9 +731,10 @@ void setup() {
     PowerManager::init();   // Initialize power management first
     MessageRouter::init();  // Initialize message router first
     BLEMesh::init();
-    LoRaBridge::init();     // Initialize LoRa radio
-    StatusReporter::init(); // Initialize status reporting
-    SerialDebug::init();    // Initialize debug interface
+    LoRaBridge::init();         // Initialize LoRa radio
+    StatusReporter::init();     // Initialize status reporting
+    SerialDebug::init();        // Initialize debug interface
+    LoopPreventionTest::init(); // Initialize loop prevention test
     
     // Test transmission system after initialization
     testTransmissionSystem();
@@ -764,9 +766,10 @@ void loop() {
     PowerManager::process();   // Process power management first
     BLEMesh::process();
     LoRaBridge::process();     // Process LoRa radio
-    MessageRouter::process();  // Process deduplication cleanup
-    StatusReporter::process(); // Process status reporting
-    SerialDebug::process();    // Process debug interface
+    MessageRouter::process();       // Process deduplication cleanup
+    StatusReporter::process();      // Process status reporting
+    SerialDebug::process();         // Process debug interface
+    LoopPreventionTest::process();  // Process loop prevention test
     
     delay(10);  // Small delay to prevent watchdog reset
 }

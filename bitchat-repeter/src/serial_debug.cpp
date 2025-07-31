@@ -7,6 +7,7 @@
 #include "message_priority_manager.h"
 #include "power_manager.h"
 #include "status_reporter.h"
+#include "loop_prevention_test.h"
 #include <Arduino.h>
 #include <WiFi.h>
 
@@ -111,6 +112,39 @@ void SerialDebug::handleCommand(const String& command) {
         } else {
             Serial.println("ERROR: Log level must be 0-3");
         }
+    } else if (cmd == "looptest") {
+        LoopPreventionTest::showTestStatus();
+    } else if (cmd.startsWith("looptest start")) {
+        // Parse optional parameters: looptest start [ttl] [duration_seconds]
+        String params = cmd.substring(15);
+        params.trim();
+        
+        uint8_t ttl = 5;
+        unsigned long duration = 300; // 5 minutes default
+        
+        if (params.length() > 0) {
+            int spaceIndex = params.indexOf(' ');
+            if (spaceIndex > 0) {
+                ttl = params.substring(0, spaceIndex).toInt();
+                duration = params.substring(spaceIndex + 1).toInt();
+            } else {
+                ttl = params.toInt();
+            }
+        }
+        
+        if (ttl < 1 || ttl > 10) {
+            Serial.println("ERROR: TTL must be 1-10");
+        } else if (duration < 30 || duration > 3600) {
+            Serial.println("ERROR: Duration must be 30-3600 seconds");
+        } else {
+            LoopPreventionTest::startTestCommand(ttl, duration);
+        }
+    } else if (cmd == "looptest stop") {
+        LoopPreventionTest::stopTestCommand();
+    } else if (cmd == "looptest results") {
+        LoopPreventionTest::printTestResults();
+    } else if (cmd == "looptest detailed") {
+        LoopPreventionTest::printDetailedAnalysis();
     } else if (cmd == "") {
         // Empty command, just show prompt
     } else {
@@ -131,9 +165,15 @@ void SerialDebug::printHelp() {
     Serial.println("  lora         - LoRa radio statistics");
     Serial.println("  ble          - BLE connection details");
     Serial.println("  log <level>  - Set debug level (0-3)");
+    Serial.println("  looptest     - Show loop prevention test status");
+    Serial.println("  looptest start [ttl] [duration] - Start loop test");
+    Serial.println("  looptest stop     - Stop current loop test");
+    Serial.println("  looptest results  - Show test results");
+    Serial.println("  looptest detailed - Show detailed analysis");
     Serial.println("  help/?       - Show this help message");
     printSeparator();
     Serial.println("Repeater ID format: 8-digit hex (e.g., 12345678)");
+    Serial.println("Loop test example: looptest start 5 300 (TTL=5, 5min test)");
 }
 
 void SerialDebug::showStatus() {
