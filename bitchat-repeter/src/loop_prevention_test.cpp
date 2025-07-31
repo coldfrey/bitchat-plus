@@ -299,6 +299,11 @@ BitchatPacket LoopPreventionTest::createTestPacket(uint32_t messageId, uint8_t t
     String payload = String(TEST_MESSAGE_PREFIX) + String(messageId);
     packet.payloadLength = payload.length();
     packet.payload = (uint8_t*)malloc(packet.payloadLength);
+    if (packet.payload == nullptr) {
+        Serial.println("Loop Prevention Test: Failed to allocate memory for test packet payload");
+        packet.payloadLength = 0;
+        return packet;
+    }
     memcpy(packet.payload, payload.c_str(), packet.payloadLength);
     
     return packet;

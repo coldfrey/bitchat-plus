@@ -164,6 +164,29 @@ void MessageRouter::recordMessage(const BitchatPacket& packet) {
 }
 
 void MessageRouter::handleBLEMessage(const BitchatPacket& packet, uint16_t connectionHandle) {
+    // Comprehensive input validation to prevent buffer overflows and network attacks
+    if (packet.payloadLength > MAX_PAYLOAD_SIZE) {
+        Serial.printf("Message Router: BLE packet payload too large (%d > %d) - dropping\n", 
+                     packet.payloadLength, MAX_PAYLOAD_SIZE);
+        return;
+    }
+    
+    if (packet.payload == nullptr && packet.payloadLength > 0) {
+        Serial.println("Message Router: BLE packet has null payload but non-zero length - dropping");
+        return;
+    }
+    
+    if (packet.ttl == 0) {
+        Serial.println("Message Router: BLE packet has TTL=0 - dropping");
+        return;
+    }
+    
+    if (packet.ttl > MAX_TTL) {
+        Serial.printf("Message Router: BLE packet TTL too high (%d > %d) - clamping\n", 
+                     packet.ttl, MAX_TTL);
+        // Note: We'll clamp this in decrementTTL function
+    }
+    
     Serial.printf("Message Router: Processing BLE message type 0x%02X from connection %d\n", 
                  packet.type, connectionHandle);
     
@@ -204,6 +227,29 @@ void MessageRouter::handleBLEMessage(const BitchatPacket& packet, uint16_t conne
 }
 
 void MessageRouter::handleLoRaMessage(const BitchatPacket& packet) {
+    // Comprehensive input validation to prevent buffer overflows and network attacks
+    if (packet.payloadLength > MAX_PAYLOAD_SIZE) {
+        Serial.printf("Message Router: LoRa packet payload too large (%d > %d) - dropping\n", 
+                     packet.payloadLength, MAX_PAYLOAD_SIZE);
+        return;
+    }
+    
+    if (packet.payload == nullptr && packet.payloadLength > 0) {
+        Serial.println("Message Router: LoRa packet has null payload but non-zero length - dropping");
+        return;
+    }
+    
+    if (packet.ttl == 0) {
+        Serial.println("Message Router: LoRa packet has TTL=0 - dropping");
+        return;
+    }
+    
+    if (packet.ttl > MAX_TTL) {
+        Serial.printf("Message Router: LoRa packet TTL too high (%d > %d) - clamping\n", 
+                     packet.ttl, MAX_TTL);
+        // Note: We'll clamp this in decrementTTL function
+    }
+    
     Serial.printf("Message Router: Processing LoRa message type 0x%02X\n", packet.type);
     
     // Handle loop prevention test messages
@@ -259,9 +305,21 @@ void MessageRouter::performCleanup() {
 
 // TTL and routing logic implementation
 bool MessageRouter::decrementTTL(BitchatPacket& packet) {
+    // Validate TTL bounds to prevent network flooding
+    if (packet.ttl == 0) {
+        Serial.println("Message Router: TTL is already 0 - dropping packet");
+        return false; // Invalid TTL
+    }
+    
+    if (packet.ttl > MAX_TTL) {
+        Serial.printf("Message Router: TTL too high (%d > %d) - clamping to max\n", packet.ttl, MAX_TTL);
+        packet.ttl = MAX_TTL; // Clamp to maximum allowed TTL
+    }
+    
     if (packet.ttl <= 1) {
         return false; // TTL exhausted, don't forward
     }
+    
     packet.ttl--; // Decrement for next hop
     return true;
 }

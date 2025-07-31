@@ -361,12 +361,32 @@ uint8_t PowerManager::voltageToPercentage(float voltage) {
     // 4.2V = 100%, 3.7V = 50%, 3.3V = 10%, 3.0V = 0%
     
     if (voltage >= 4.2) return 100;
-    if (voltage >= 4.0) return 80 + (voltage - 4.0) * 100; // 80-100%
-    if (voltage >= 3.8) return 60 + (voltage - 3.8) * 100; // 60-80%
-    if (voltage >= 3.6) return 40 + (voltage - 3.6) * 100; // 40-60%
-    if (voltage >= 3.4) return 20 + (voltage - 3.4) * 100; // 20-40%
-    if (voltage >= 3.2) return 10 + (voltage - 3.2) * 50;  // 10-20%
-    if (voltage >= 3.0) return (voltage - 3.0) * 50;       // 0-10%
+    
+    // Clamp all calculations to prevent uint8_t overflow
+    if (voltage >= 4.0) {
+        int result = 80 + (voltage - 4.0) * 100; // 80-100%
+        return (result > 255) ? 255 : (uint8_t)result;
+    }
+    if (voltage >= 3.8) {
+        int result = 60 + (voltage - 3.8) * 100; // 60-80%
+        return (result > 255) ? 255 : (uint8_t)result;
+    }
+    if (voltage >= 3.6) {
+        int result = 40 + (voltage - 3.6) * 100; // 40-60%
+        return (result > 255) ? 255 : (uint8_t)result;
+    }
+    if (voltage >= 3.4) {
+        int result = 20 + (voltage - 3.4) * 100; // 20-40%
+        return (result > 255) ? 255 : (uint8_t)result;
+    }
+    if (voltage >= 3.2) {
+        int result = 10 + (voltage - 3.2) * 50;  // 10-20%
+        return (result > 255) ? 255 : (uint8_t)result;
+    }
+    if (voltage >= 3.0) {
+        int result = (voltage - 3.0) * 50;       // 0-10%
+        return (result > 255) ? 255 : (uint8_t)result;
+    }
     
     return 0;
 }

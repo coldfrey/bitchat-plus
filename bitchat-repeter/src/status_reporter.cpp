@@ -91,6 +91,11 @@ BitchatPacket StatusReporter::createStatusPacket() {
     // Allocate payload and copy status message
     packet.payloadLength = statusMessage.length();
     packet.payload = (uint8_t*)malloc(packet.payloadLength);
+    if (packet.payload == nullptr) {
+        Serial.println("Status Reporter: Failed to allocate memory for status packet payload");
+        packet.payloadLength = 0;
+        return packet;
+    }
     memcpy(packet.payload, statusMessage.c_str(), packet.payloadLength);
     
     return packet;

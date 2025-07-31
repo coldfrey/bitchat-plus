@@ -6,6 +6,7 @@
 #include <map>
 #include <string>
 #include <queue>
+#include <atomic>
 
 // Transmission queue entry for LoRa packets
 struct QueuedPacket {
@@ -215,6 +216,15 @@ private:
     static const uint8_t MAX_RETRIES = 3;
 };
 
+// Rate limiting structures
+struct RateLimitEntry {
+    unsigned long windowStart;    // Start of current time window
+    uint8_t packetCount;         // Packets sent in current window
+    unsigned long lastPacket;    // Timestamp of last packet
+    
+    RateLimitEntry() : windowStart(0), packetCount(0), lastPacket(0) {}
+};
+
 class LoRaBridge {
 public:
     static void init();
@@ -225,6 +235,10 @@ public:
     static bool transmitLoRaPacket(const LoRaPacket& packet);
     static bool queueLoRaPacket(const LoRaPacket& packet);
     static void startReceive();
+    
+    // Rate limiting
+    static bool checkRateLimit(uint32_t sourceId);
+    static void updateRateLimit(uint32_t sourceId);
     
     // Neighbor discovery
     static void sendNeighborAnnouncement();
@@ -305,6 +319,11 @@ private:
     static unsigned long txCount;
     static unsigned long rxCount;
     
+    // Rate limiting per source ID
+    static std::map<uint32_t, RateLimitEntry> rateLimitTable;
+    static const uint8_t MAX_PACKETS_PER_WINDOW = 10;    // Max packets per 60 second window
+    static const unsigned long RATE_LIMIT_WINDOW_MS = 60000; // 60 seconds
+    
     // Configuration constants
     static const float FREQUENCY;
     static const float BANDWIDTH;
@@ -327,7 +346,7 @@ private:
     static const unsigned long OPTIMIZATION_UPDATE_INTERVAL_MS = 30000; // 30 seconds
     
     // Interrupt handling
-    static volatile bool receivedFlag;
+    static std::atomic<bool> receivedFlag;
     static void onReceive();
     
     // Helper functions

@@ -37,6 +37,12 @@ bool isSupportedMessageType(uint8_t type) {
 
 // Parse a BitChat packet from binary data
 ParseResult parsePacket(const uint8_t* data, size_t length, BitchatPacket& packet) {
+    // Validate data pointer to prevent null pointer dereference
+    if (data == nullptr) {
+        Serial.println("Packet Parser: Null data pointer provided");
+        return PARSE_ERROR;
+    }
+    
     // Minimum packet size: version(1) + type(1) + senderID(8) + recipientID(8) + timestamp(8) + ttl(1) + payloadLength(2) = 29 bytes
     const size_t MIN_PACKET_SIZE = 29;
     

@@ -45,6 +45,10 @@ struct LoRaQueueEntry {
     }
 };
 
+// Constants for message routing validation
+const uint8_t MAX_TTL = 10; // Maximum allowed TTL to prevent network flooding
+const uint16_t MAX_PAYLOAD_SIZE = 220; // Maximum allowed payload size (from LoRa constraints)
+
 class MessageRouter {
 public:
     static void init();

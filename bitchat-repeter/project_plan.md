@@ -531,3 +531,213 @@ The BitChat Repeater implements a **dual transport architecture**:
 - Ask for clarification if any prompt is unclear
 - The goal is zero changes to the iOS app - maintain exact protocol compatibility
 - LoRa mesh is now introduced early (Phase 4) to enable testing throughout development
+
+
+# Diagrams
+```
+graph TB
+    subgraph "iOS Devices"
+        iOS1[iOS Device 1]
+        iOS2[iOS Device 2]
+        iOS3[iOS Device 3]
+    end
+
+    subgraph "Repeater Firmware Architecture"
+        subgraph "BLE Layer"
+            BLE[BLE Peripheral<br/>NimBLE Server]
+            BLEADV[BLE Advertiser<br/>Service UUID]
+            BLERX[RX Characteristic<br/>iOS → Repeater]
+            BLETX[TX Characteristic<br/>Repeater → iOS]
+            VERNEG[Version Negotiation<br/>HELLO/ACK Protocol]
+        end
+
+        subgraph "Message Processing Core"
+            PARSER[BitChat Packet Parser<br/>Binary Protocol]
+            ROUTER[Message Router<br/>TTL & Routing Logic]
+            DEDUP[Deduplication Cache<br/>Message ID Hash Map]
+            QUEUE[Priority Queues<br/>Presence > Private > Broadcast]
+        end
+
+        subgraph "LoRa Mesh Layer"
+            LORA[LoRa Radio<br/>SX1262 RadioLib]
+            MESH[Mesh Protocol Handler]
+            NEIGHBOR[Neighbor Table<br/>RSSI & Link Quality]
+            ROUTES[Route Table<br/>AODV Routing]
+            MESHACK[Mesh ACK Handler<br/>Reliability Layer]
+        end
+
+        subgraph "System Services"
+            CONFIG[Config Manager<br/>NVS Storage]
+            POWER[Power Manager<br/>Sleep & Battery]
+            DEBUG[Debug Interface<br/>Serial Commands]
+            CONN[Connection Manager<br/>Quality Tracking]
+        end
+    end
+
+    subgraph "Other Repeaters"
+        REP1[Repeater 1]
+        REP2[Repeater 2]
+        REP3[Repeater 3]
+    end
+
+    %% iOS to Repeater connections
+    iOS1 -.->|BLE| BLEADV
+    iOS2 -.->|BLE| BLEADV
+    iOS3 -.->|BLE| BLEADV
+    
+    %% BLE internal flow
+    BLEADV --> BLE
+    BLE --> BLERX
+    BLE --> BLETX
+    BLERX --> VERNEG
+    VERNEG --> PARSER
+
+    %% Message processing flow
+    PARSER --> DEDUP
+    DEDUP -->|New Message| ROUTER
+    DEDUP -->|Duplicate| X1[Drop]
+    ROUTER -->|Check TTL| QUEUE
+    ROUTER -->|TTL=0| X2[Drop]
+    
+    %% Routing decisions
+    QUEUE -->|To LoRa| MESH
+    QUEUE -->|To iOS| BLETX
+    
+    %% LoRa mesh flow
+    MESH --> LORA
+    LORA -->|TX| REP1
+    LORA -->|TX| REP2
+    LORA -->|TX| REP3
+    
+    %% Mesh protocols
+    MESH <--> NEIGHBOR
+    MESH <--> ROUTES
+    MESH <--> MESHACK
+    
+    %% Incoming LoRa
+    REP1 -->|RX| LORA
+    REP2 -->|RX| LORA
+    REP3 -->|RX| LORA
+    LORA --> MESH
+    MESH -->|DATA Packet| PARSER
+    
+    %% System services connections
+    CONFIG -.-> LORA
+    CONFIG -.-> BLE
+    POWER -.-> LORA
+    POWER -.-> BLE
+    CONN -.-> BLE
+    CONN -.-> MESH
+    DEBUG -.-> NEIGHBOR
+    DEBUG -.-> ROUTES
+    DEBUG -.-> DEDUP
+
+    %% Styling
+    classDef iosStyle fill:#4A90E2,stroke:#2E5C8A,color:#fff
+    classDef bleStyle fill:#7B68EE,stroke:#4B0082,color:#fff
+    classDef coreStyle fill:#32CD32,stroke:#228B22,color:#fff
+    classDef loraStyle fill:#FF6347,stroke:#DC143C,color:#fff
+    classDef sysStyle fill:#FFD700,stroke:#DAA520,color:#000
+    classDef repStyle fill:#FF8C00,stroke:#FF4500,color:#fff
+    
+    class iOS1,iOS2,iOS3 iosStyle
+    class BLE,BLEADV,BLERX,BLETX,VERNEG bleStyle
+    class PARSER,ROUTER,DEDUP,QUEUE coreStyle
+    class LORA,MESH,NEIGHBOR,ROUTES,MESHACK loraStyle
+    class CONFIG,POWER,DEBUG,CONN sysStyle
+    class REP1,REP2,REP3 repStyle
+```
+
+```
+sequenceDiagram
+    participant iOS as iOS Device
+    participant BLE as BLE Layer
+    participant Parser as Packet Parser
+    participant Router as Message Router
+    participant Dedup as Dedup Cache
+    participant Queue as Priority Queue
+    participant Mesh as Mesh Protocol
+    participant LoRa as LoRa Radio
+    participant Remote as Remote Repeater
+
+    Note over iOS,Remote: Incoming Message from iOS
+    iOS->>BLE: Connect & Send Message
+    BLE->>BLE: Version Negotiation
+    BLE->>Parser: Raw Binary Data
+    Parser->>Dedup: Check Message ID
+    alt New Message
+        Dedup->>Router: Process Message
+        Router->>Router: Decrement TTL
+        Router->>Queue: Queue for Transmission
+        Queue->>Mesh: Send via LoRa
+        Mesh->>Mesh: Add Mesh Headers
+        Mesh->>LoRa: Transmit Packet
+        LoRa->>Remote: RF Transmission
+    else Duplicate
+        Dedup->>Dedup: Drop Message
+    end
+
+    Note over iOS,Remote: Incoming Message from LoRa Mesh
+    Remote->>LoRa: RF Reception
+    LoRa->>Mesh: Receive Packet
+    Mesh->>Mesh: Process Mesh Headers
+    alt Data Packet
+        Mesh->>Parser: Extract BitChat Packet
+        Parser->>Dedup: Check Message ID
+        alt New Message
+            Dedup->>Router: Process Message
+            Router->>Queue: Queue for BLE
+            Queue->>BLE: Send to iOS
+            BLE->>iOS: Notify Message
+        end
+    else Mesh Control
+        Mesh->>Mesh: Update Tables
+    end
+```
+
+```
+sequenceDiagram
+    participant iOS as iOS Device
+    participant BLE as BLE Layer
+    participant Parser as Packet Parser
+    participant Router as Message Router
+    participant Dedup as Dedup Cache
+    participant Queue as Priority Queue
+    participant Mesh as Mesh Protocol
+    participant LoRa as LoRa Radio
+    participant Remote as Remote Repeater
+
+    Note over iOS,Remote: Incoming Message from iOS
+    iOS->>BLE: Connect & Send Message
+    BLE->>BLE: Version Negotiation
+    BLE->>Parser: Raw Binary Data
+    Parser->>Dedup: Check Message ID
+    alt New Message
+        Dedup->>Router: Process Message
+        Router->>Router: Decrement TTL
+        Router->>Queue: Queue for Transmission
+        Queue->>Mesh: Send via LoRa
+        Mesh->>Mesh: Add Mesh Headers
+        Mesh->>LoRa: Transmit Packet
+        LoRa->>Remote: RF Transmission
+    else Duplicate
+        Dedup->>Dedup: Drop Message
+    end
+
+    Note over iOS,Remote: Incoming Message from LoRa Mesh
+    Remote->>LoRa: RF Reception
+    LoRa->>Mesh: Receive Packet
+    Mesh->>Mesh: Process Mesh Headers
+    alt Data Packet
+        Mesh->>Parser: Extract BitChat Packet
+        Parser->>Dedup: Check Message ID
+        alt New Message
+            Dedup->>Router: Process Message
+            Router->>Queue: Queue for BLE
+            Queue->>BLE: Send to iOS
+            BLE->>iOS: Notify Message
+        end
+    else Mesh Control
+        Mesh->>Mesh: Update Tables
+    end
+```

@@ -2,6 +2,7 @@
 #include "message_router.h"
 #include <Arduino.h>
 #include <algorithm>
+#include <esp_random.h>
 
 // NeighborTable static member definitions
 std::map<uint32_t, NeighborEntry> NeighborTable::neighbors;
@@ -38,7 +39,8 @@ int LoRaBridge::lastRSSI = 0;
 float LoRaBridge::lastSNR = 0.0;
 unsigned long LoRaBridge::txCount = 0;
 unsigned long LoRaBridge::rxCount = 0;
-volatile bool LoRaBridge::receivedFlag = false;
+std::atomic<bool> LoRaBridge::receivedFlag{false};
+std::map<uint32_t, RateLimitEntry> LoRaBridge::rateLimitTable;
 
 // Configuration constants
 const float LoRaBridge::FREQUENCY = 915.0;           // MHz (US ISM band)
@@ -120,9 +122,8 @@ void LoRaBridge::process() {
         return;
     }
     
-    // Handle received messages
-    if (receivedFlag) {
-        receivedFlag = false;
+    // Handle received messages - use atomic compare-and-swap for thread safety
+    if (receivedFlag.exchange(false)) {
         handleReceivedMessage();
         
         // Restart receive mode
@@ -222,6 +223,12 @@ bool LoRaBridge::queueLoRaPacket(const LoRaPacket& packet) {
         return false;
     }
     
+    // Apply rate limiting to prevent DoS attacks
+    if (!checkRateLimit(packet.srcRepeater)) {
+        Serial.printf("LoRa Bridge: Dropping packet from 0x%08X due to rate limiting\n", packet.srcRepeater);
+        return false;
+    }
+    
     // Check if queue is full
     if (transmissionQueue.size() >= MAX_QUEUE_SIZE) {
         Serial.printf("LoRa Bridge: Queue full (%d packets), dropping oldest\n", transmissionQueue.size());
@@ -231,6 +238,9 @@ bool LoRaBridge::queueLoRaPacket(const LoRaPacket& packet) {
     // Add packet to queue
     QueuedPacket queuedPacket(packet);
     transmissionQueue.push(queuedPacket);
+    
+    // Update rate limiting counter
+    updateRateLimit(packet.srcRepeater);
     
     Serial.printf("LoRa Bridge: Queued LoRa packet (type=0x%02X, queue size: %d)\n", 
                  packet.type, transmissionQueue.size());
@@ -656,11 +666,6 @@ void LoRaBridge::sendNeighborAnnouncement() {
 }
 
 void LoRaBridge::handleNeighborAnnouncement(const LoRaPacket& packet, int rssi) {
-    if (packet.payloadLen < 26) { // Minimum size for announcement
-        Serial.println("LoRa Bridge: Invalid neighbor announcement - payload too small");
-        return;
-    }
-    
     struct __attribute__((packed)) NeighborAnnouncement {
         uint32_t repeaterId;
         char name[16];
@@ -669,6 +674,19 @@ void LoRaBridge::handleNeighborAnnouncement(const LoRaPacket& packet, int rssi) 
         uint8_t capabilities;
         uint8_t firmwareVersion;
     };
+    
+    // Validate payload size before casting to prevent buffer overflow
+    if (packet.payloadLen < sizeof(NeighborAnnouncement)) {
+        Serial.printf("LoRa Bridge: Invalid neighbor announcement - payload too small (%d < %d)\n", 
+                     packet.payloadLen, sizeof(NeighborAnnouncement));
+        return;
+    }
+    
+    // Additional bounds check to ensure payload pointer is valid
+    if (packet.payload == nullptr) {
+        Serial.println("LoRa Bridge: Invalid neighbor announcement - null payload");
+        return;
+    }
     
     const NeighborAnnouncement* announcement = 
         reinterpret_cast<const NeighborAnnouncement*>(packet.payload);
@@ -862,8 +880,12 @@ unsigned long LoRaBridge::getRandomBackoff(uint8_t retryCount) {
         backoffTime = maxTime;
     }
     
-    // Add random jitter (0-50% of backoff time)
-    unsigned long jitter = random(0, backoffTime / 2);
+    // Add random jitter (0-50% of backoff time) using secure hardware RNG
+    unsigned long maxJitter = backoffTime / 2;
+    if (maxJitter == 0) maxJitter = 1; // Avoid divide by zero
+    
+    // Use ESP32 hardware random number generator for cryptographically secure randomness
+    unsigned long jitter = esp_random() % maxJitter;
     
     return backoffTime + jitter;
 }
@@ -1723,4 +1745,54 @@ void LoRaBridge::updateNetworkOptimization() {
     RouteTable::updateRouteMetrics();
     
     Serial.println("LoRa Bridge: Network optimization update completed");
+}
+
+// Rate limiting implementation to prevent DoS attacks
+bool LoRaBridge::checkRateLimit(uint32_t sourceId) {
+    unsigned long now = millis();
+    
+    // Get or create rate limit entry for this source
+    RateLimitEntry& entry = rateLimitTable[sourceId];
+    
+    // Check if we need to start a new time window
+    if (now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
+        // Start new window
+        entry.windowStart = now;
+        entry.packetCount = 0;
+    }
+    
+    // Check if source has exceeded rate limit
+    if (entry.packetCount >= MAX_PACKETS_PER_WINDOW) {
+        Serial.printf("LoRa Bridge: Rate limit exceeded for source 0x%08X (%d packets in %lu ms)\n", 
+                     sourceId, entry.packetCount, RATE_LIMIT_WINDOW_MS);
+        return false; // Rate limit exceeded
+    }
+    
+    return true; // Rate limit not exceeded
+}
+
+void LoRaBridge::updateRateLimit(uint32_t sourceId) {
+    unsigned long now = millis();
+    
+    // Get or create rate limit entry for this source
+    RateLimitEntry& entry = rateLimitTable[sourceId];
+    
+    // Update packet count and timestamp
+    entry.packetCount++;
+    entry.lastPacket = now;
+    
+    // Cleanup old entries periodically (every 10 minutes)
+    static unsigned long lastCleanup = 0;
+    if (now - lastCleanup > 600000) { // 10 minutes
+        auto it = rateLimitTable.begin();
+        while (it != rateLimitTable.end()) {
+            // Remove entries that haven't been used in the last 10 minutes
+            if (now - it->second.lastPacket > 600000) {
+                it = rateLimitTable.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        lastCleanup = now;
+    }
 }
