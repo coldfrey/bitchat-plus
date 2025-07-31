@@ -2,20 +2,21 @@
 # Zero App Changes - Pure Mesh Extension
 
 ## Overview
-This document contains a series of prompts for implementing the BitChat repeater firmware. The repeater will mimic a regular BitChat device, appearing as a normal peer to the existing iOS app while internally bridging messages over LoRa to extend range.
+This document contains a series of prompts for implementing the BitChat repeater firmware. The repeater will mimic a regular BitChat device, appearing as a normal peer to iOS apps while internally bridging messages over LoRa mesh networks to extend range dramatically.
 
 ## Key Design Principles
-1. **Complete Protocol Compatibility** - Uses existing BitChat BLE protocol
-2. **Transparent Operation** - Apps see repeaters as regular peers
-3. **Automatic Mesh Extension** - No configuration needed
-4. **Smart Flooding Control** - Prevents loops while maintaining reliability
+1. **Complete Protocol Compatibility** - Uses existing BitChat BLE protocol for iOS connections
+2. **Transparent Operation** - iOS apps see repeaters as regular peers
+3. **Dual Transport Architecture** - BLE for iOS devices, LoRa mesh for repeater networks
+4. **Automatic Mesh Extension** - No configuration needed, self-organizing network
+5. **Smart Routing Control** - Prevents loops while optimizing delivery paths
 
 ---
 
 ## Phase 1: Foundation Setup
 
 ### Prompt 1.1: Project Structure
-**Status: [ ] Not Started**
+**Status: [x] Completed**
 
 Create the basic project structure for the bitchat-repeater firmware:
 1. Set up PlatformIO project for Heltec WiFi LoRa 32 V3 (ESP32-S3)
@@ -31,7 +32,7 @@ Create the basic project structure for the bitchat-repeater firmware:
 4. Ensure the project builds successfully with empty implementations
 
 ### Prompt 1.2: BitChat Protocol Constants
-**Status: [ ] Not Started**
+**Status: [x] Completed**
 
 Extract and implement the BitChat protocol constants from the iOS app:
 1. Read BluetoothMeshService.swift and extract:
@@ -50,7 +51,7 @@ Extract and implement the BitChat protocol constants from the iOS app:
 ## Phase 2: BLE Mesh Implementation
 
 ### Prompt 2.1: BLE Peripheral Mode
-**Status: [ ] Not Started**
+**Status: [x] Completed**
 
 Implement the BLE peripheral (server) functionality to accept connections from iOS devices:
 1. In src/ble_mesh.cpp, implement BLE server using NimBLE
@@ -62,29 +63,28 @@ Implement the BLE peripheral (server) functionality to accept connections from i
 7. Generate peer ID from MAC address using same format as iOS (8 char hex string)
 8. Test that iOS app can discover and connect to the repeater
 
-### Prompt 2.2: BLE Central Mode
-**Status: [ ] Not Started**
+### Prompt 2.2: BLE Architecture Simplification  
+**Status: [x] Completed**
 
-Implement BLE central (client) functionality to connect to other devices:
-1. Add scanning for BitChat service UUID
-2. Implement connection to discovered peripherals (max 3 connections)
-3. Discover services and characteristics after connection
-4. Subscribe to TX characteristic for notifications
-5. Store peer ID for each connected peripheral
-6. Implement automatic reconnection on disconnect
-7. Test repeater-to-repeater connections
+Simplify BLE implementation for iOS-only connections:
+1. Remove BLE central/client functionality (repeater-to-repeater via LoRa only)
+2. Focus BLE peripheral mode on iOS device connections exclusively
+3. Eliminate scanning, peer discovery, and client connection management
+4. Streamline data flow: iOS ↔ BLE ↔ Message Router ↔ LoRa Mesh
+5. Optimize memory usage and reduce complexity
+6. Prepare clean interface for LoRa mesh integration (Phase 8)
 
 ### Prompt 2.3: Version Negotiation
 **Status: [ ] Not Started**
 
-Implement the BitChat version negotiation protocol:
-1. As peripheral: wait for HELLO (0xAA) message after connection
-2. Parse version from HELLO and respond with ACK (0xAB) + version 3
-3. As central: send HELLO with version 3 after subscribing to TX
-4. Wait for ACK and store negotiated version
-5. Set connection state to "ready" only after successful negotiation
-6. Reject messages from connections without completed negotiation
-7. Test with iOS app to ensure negotiation succeeds
+Implement the BitChat version negotiation protocol for iOS connections:
+1. As peripheral: wait for VERSION_HELLO (0x20) message after iOS connection
+2. Parse version from VERSION_HELLO and respond with VERSION_ACK (0x21) + version 3
+3. Store negotiated version for each connected iOS device
+4. Set connection state to "ready" only after successful negotiation
+5. Reject messages from connections without completed negotiation
+6. Test with iOS app to ensure version negotiation succeeds
+7. Handle version incompatibility gracefully
 
 ---
 
@@ -127,17 +127,16 @@ Implement a robust message deduplication system:
 
 Implement the core message routing logic:
 1. Create MessageRouter class to handle routing decisions
-2. When receiving from BLE:
+2. When receiving from BLE (iOS devices):
    - Check deduplication cache
    - Decrement TTL (drop if 0)
-   - Queue for LoRa transmission
-   - Forward to other BLE connections (except source)
-3. When receiving from LoRa:
+   - Queue for LoRa mesh transmission to other repeaters
+3. When receiving from LoRa mesh:
    - Check deduplication cache
    - Decrement TTL (drop if 0)
-   - Forward to all BLE connections
+   - Forward to all connected iOS devices via BLE
 4. Add 0-100ms random delay for LoRa to prevent collisions
-5. Track source to prevent echo
+5. Track source to prevent echo and loops
 6. Test with multiple repeaters to verify no loops
 
 ---
@@ -324,9 +323,9 @@ Comprehensive compatibility testing:
    - Presence updates work
    - Typing indicators relay
 2. Test mixed networks:
-   - Phone → Repeater → Phone
-   - Phone → Repeater → Repeater → Phone
-   - Multiple phones and repeaters
+   - Phone → Repeater → Phone (single hop via BLE)
+   - Phone → Repeater → LoRa Mesh → Repeater → Phone (multi-hop)
+   - Multiple phones and repeaters in mesh topology
 3. Verify 24-hour stability
 4. Document any compatibility issues
 
@@ -347,6 +346,156 @@ Final performance optimization:
 
 ---
 
+## Phase 8: LoRa Mesh Networking (Meshtastic-Inspired)
+
+### Overview
+Implement a lightweight mesh protocol inspired by Meshtastic's proven concepts, but tailored for BitChat compatibility. This allows repeaters to form multi-hop networks while maintaining transparent operation with iOS BitChat apps.
+
+### Key Differences from Meshtastic:
+- Maintains BitChat BLE protocol on device-facing side
+- Simplified mesh protocol optimized for BitChat message relay
+- No encryption on mesh layer (BitChat handles E2E encryption)
+- Focused on message relay rather than general-purpose messaging
+
+### Prompt 8.1: Mesh Protocol Design
+**Status: [ ] Not Started**
+
+Design and implement a lightweight mesh protocol for repeater-to-repeater communication:
+1. Create mesh packet types in lora_bridge.h:
+   - NEIGHBOR_ANNOUNCE (0x01): Periodic broadcasts with repeater info
+   - ROUTE_REQUEST (0x02): Path discovery messages
+   - ROUTE_REPLY (0x03): Path confirmation
+   - DATA (0x04): Encapsulated BitChat messages
+   - MESH_ACK (0x05): Hop-by-hop acknowledgments
+2. Add mesh header to LoRa packets:
+   ```c
+   struct MeshHeader {
+       uint8_t type;          // Mesh packet type
+       uint32_t srcRepeater;  // Original repeater ID
+       uint32_t destRepeater; // Target repeater (0xFFFFFFFF = broadcast)
+       uint32_t nextHop;      // Next hop repeater
+       uint8_t hopCount;      // Hops traveled
+       uint8_t maxHops;       // TTL for mesh (default 5)
+       uint16_t seqNum;       // Sequence number for routing
+   };
+   ```
+3. Modify LoRaPacket to include mesh header
+4. Design simple distance-vector routing algorithm
+5. Test basic mesh packet exchange between repeaters
+
+### Prompt 8.2: Neighbor Discovery
+**Status: [ ] Not Started**
+
+Implement neighbor discovery and maintenance:
+1. Create NeighborTable class in lora_bridge.cpp
+2. Send NEIGHBOR_ANNOUNCE every 60 seconds containing:
+   - Repeater ID and name
+   - Current load (connected BLE devices, queue depth)
+   - Capabilities flags (battery powered, GPS equipped, etc.)
+   - Firmware version
+3. Maintain neighbor table with:
+   - Neighbor ID
+   - Last seen timestamp  
+   - Average RSSI (rolling average of last 10 packets)
+   - Link quality score (based on RSSI and packet success rate)
+   - Hop count to neighbor
+4. Remove stale neighbors after 5 minutes of no contact
+5. Implement adaptive announcement rate:
+   - Every 30s when network unstable
+   - Every 120s when stable
+6. Add neighbor table to debug interface
+
+### Prompt 8.3: Mesh Routing
+**Status: [ ] Not Started**
+
+Implement routing algorithm for multi-hop communication:
+1. Create RouteTable class with route entries
+2. Implement simplified AODV (Ad hoc On-Demand Distance Vector):
+   - Route discovery only when needed
+   - Cache routes with 10-minute timeout
+   - Use sequence numbers to ensure fresh routes
+3. Route discovery process:
+   - Broadcast ROUTE_REQUEST with unique request ID
+   - Intermediate nodes add themselves to path and forward
+   - Destination sends ROUTE_REPLY back along reverse path
+   - Build bidirectional routes from discovery
+4. Route maintenance:
+   - Monitor next-hop reachability via ACKs
+   - Mark routes stale on repeated failures
+   - Trigger rediscovery for stale routes
+5. Fallback to flooding for broadcast messages
+6. Test multi-hop routing with 4+ repeaters
+
+### Prompt 8.4: Reliable Delivery
+**Status: [ ] Not Started**
+
+Add reliability layer for mesh communication:
+1. Implement hop-by-hop acknowledgments:
+   - ACK required for unicast DATA packets
+   - 3 retries with exponential backoff (100ms, 200ms, 400ms)
+   - Mark link failed after 3 failed attempts
+2. Alternative path selection:
+   - Maintain up to 3 routes per destination
+   - Switch to alternate route on failure
+   - Load balance across multiple good routes
+3. End-to-end delivery for critical messages:
+   - Optional E2E ACK for private messages
+   - Source retransmission if no E2E ACK
+4. Store-and-forward buffer:
+   - Hold messages for temporarily unreachable repeaters
+   - Maximum 50 messages, 5 minute timeout
+5. Mesh-level deduplication:
+   - Separate from BitChat dedup
+   - Track by source + sequence number
+
+### Prompt 8.5: Mesh Optimization
+**Status: [ ] Not Started**
+
+Optimize mesh performance and efficiency:
+1. Implement adaptive data rates:
+   - Monitor link RSSI to each neighbor
+   - Use SF7 for strong links (>-80 dBm)
+   - Use SF9 for medium links (-80 to -100 dBm)  
+   - Use SF10 for weak links (<-100 dBm)
+   - Adjust per-link, not globally
+2. Channel coordination:
+   - Implement simple TDMA for known neighbors
+   - 100ms slots, rotating schedule
+   - Fall back to CSMA for new nodes
+3. Load balancing:
+   - Include queue depth in routing metrics
+   - Prefer less loaded paths
+   - Distribute broadcasts across time
+4. Power-aware routing:
+   - Mark battery-powered nodes in announcements
+   - Prefer mains-powered repeaters for routing
+   - Reduce announce rate for battery nodes
+5. Test optimizations with 10+ node network
+
+### Prompt 8.6: Mesh Integration
+**Status: [ ] Not Started**
+
+Integrate mesh networking with existing message flow:
+1. Modify message_router.cpp to use mesh routing:
+   - Check if destination repeater is known
+   - Use mesh unicast for targeted delivery
+   - Fall back to broadcast for unknown destinations
+2. Add mesh statistics to status messages:
+   - Number of mesh neighbors
+   - Routing table size
+   - Mesh reliability metrics
+3. Implement hybrid routing:
+   - Direct LoRa broadcast for 1-hop neighbors
+   - Mesh routing for distant repeaters
+   - Automatic mode selection
+4. Update debug interface with mesh commands:
+   - `mesh`: Show neighbor and route tables
+   - `ping <repeater-id>`: Test mesh connectivity
+   - `trace <repeater-id>`: Show route path
+5. Test full integration with BitChat traffic
+
+---
+
 ## Completion Checklist
 
 After all prompts are complete, verify:
@@ -357,6 +506,9 @@ After all prompts are complete, verify:
 - [ ] TTL properly decremented
 - [ ] Deduplication prevents floods
 - [ ] LoRa extends range significantly beyond BLE
+- [ ] LoRa mesh enables multi-hop repeater networks
+- [ ] Mesh routing optimizes for reliability and efficiency
+- [ ] Neighbor discovery maintains network topology
 - [ ] Power consumption acceptable for battery use
 - [ ] Configuration persists across reboots
 - [ ] Debug interface provides useful information
@@ -373,3 +525,4 @@ After all prompts are complete, verify:
 - Use clear, descriptive commit messages
 - Ask for clarification if any prompt is unclear
 - The goal is zero changes to the iOS app - maintain exact protocol compatibility
+- Phase 8 adds mesh networking between repeaters while maintaining BLE compatibility
