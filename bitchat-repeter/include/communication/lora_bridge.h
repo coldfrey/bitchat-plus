@@ -1,8 +1,8 @@
 #pragma once
 
 #include <RadioLib.h>
-#include "hardware_config.h"
-#include "bitchat_protocol.h"
+#include "../hardware/hardware_config.h"
+#include "../core/bitchat_protocol.h"
 #include <map>
 #include <string>
 #include <queue>

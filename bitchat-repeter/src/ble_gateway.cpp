@@ -1,6 +1,6 @@
-#include "ble_gateway.h"
-#include "message_router.h"
-#include "connection_manager.h"
+#include "communication/ble_gateway.h"
+#include "communication/message_router.h"
+#include "core/connection_manager.h"
 #include <Arduino.h>
 #include <WiFi.h>
 

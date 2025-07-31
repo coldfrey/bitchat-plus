@@ -1,5 +1,5 @@
-#include "config_manager.h"
-#include "hardware_config.h"
+#include "utils/config_manager.h"
+#include "hardware/hardware_config.h"
 #include <WiFi.h>
 
 // Static member definitions

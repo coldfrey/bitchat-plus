@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include "bitchat_protocol.h"
+#include "../core/bitchat_protocol.h"
 
 class StatusReporter {
 public:

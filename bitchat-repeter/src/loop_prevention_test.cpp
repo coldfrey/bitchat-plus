@@ -1,7 +1,7 @@
-#include "loop_prevention_test.h"
-#include "message_router.h"
-#include "ble_gateway.h"
-#include "lora_bridge.h"
+#include "utils/loop_prevention_test.h"
+#include "communication/message_router.h"
+#include "communication/ble_gateway.h"
+#include "communication/lora_bridge.h"
 #include <Arduino.h>
 
 // Static member definitions

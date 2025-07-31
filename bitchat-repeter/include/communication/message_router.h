@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <map>
 #include <vector>
-#include "bitchat_protocol.h"
+#include "../core/bitchat_protocol.h"
 
 // Message deduplication entry
 struct MessageCacheEntry {

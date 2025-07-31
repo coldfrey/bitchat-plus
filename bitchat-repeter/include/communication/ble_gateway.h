@@ -6,7 +6,7 @@
 #include <NimBLECharacteristic.h>
 #include <NimBLEAdvertising.h>
 #include <map>
-#include "bitchat_protocol.h"
+#include "../core/bitchat_protocol.h"
 
 // iOS device connection state
 struct iOSConnectionState {

@@ -1,16 +1,16 @@
 #include <Arduino.h>
-#include "hardware_config.h"
-#include "ble_gateway.h"
-#include "lora_bridge.h"
-#include "message_router.h"
-#include "config_manager.h"
-#include "bitchat_protocol.h"
-#include "connection_manager.h"
-#include "message_priority_manager.h"
-#include "power_manager.h"
-#include "status_reporter.h"
-#include "serial_debug.h"
-#include "loop_prevention_test.h"
+#include "hardware/hardware_config.h"
+#include "communication/ble_gateway.h"
+#include "communication/lora_bridge.h"
+#include "communication/message_router.h"
+#include "utils/config_manager.h"
+#include "core/bitchat_protocol.h"
+#include "core/connection_manager.h"
+#include "core/message_priority_manager.h"
+#include "hardware/power_manager.h"
+#include "utils/status_reporter.h"
+#include "utils/serial_debug.h"
+#include "utils/loop_prevention_test.h"
 
 // Test function to verify LoRa packet format works correctly
 void testLoRaPacketFormat() {

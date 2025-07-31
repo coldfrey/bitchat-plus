@@ -1,7 +1,7 @@
-#include "power_manager.h"
-#include "hardware_config.h"
-#include "ble_gateway.h"
-#include "lora_bridge.h"
+#include "hardware/power_manager.h"
+#include "hardware/hardware_config.h"
+#include "communication/ble_gateway.h"
+#include "communication/lora_bridge.h"
 #include <esp_sleep.h>
 #include <esp_adc_cal.h>
 #include <Arduino.h>

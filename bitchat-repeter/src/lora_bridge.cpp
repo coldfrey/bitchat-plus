@@ -1,5 +1,5 @@
-#include "lora_bridge.h"
-#include "message_router.h"
+#include "communication/lora_bridge.h"
+#include "communication/message_router.h"
 #include <Arduino.h>
 #include <algorithm>
 #include <esp_random.h>

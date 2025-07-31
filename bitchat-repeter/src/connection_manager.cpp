@@ -1,5 +1,5 @@
-#include "connection_manager.h"
-#include "lora_bridge.h"
+#include "core/connection_manager.h"
+#include "communication/lora_bridge.h"
 #include <Arduino.h>
 
 // Static member definitions

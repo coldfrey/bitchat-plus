@@ -1,4 +1,4 @@
-#include "bitchat_protocol.h"
+#include "core/bitchat_protocol.h"
 #include <Arduino.h>
 #include <esp_system.h>
 
@@ -40,7 +40,7 @@ ParseResult parsePacket(const uint8_t* data, size_t length, BitchatPacket& packe
     // Validate data pointer to prevent null pointer dereference
     if (data == nullptr) {
         Serial.println("Packet Parser: Null data pointer provided");
-        return PARSE_ERROR;
+        return PARSE_INCOMPLETE;
     }
     
     // Minimum packet size: version(1) + type(1) + senderID(8) + recipientID(8) + timestamp(8) + ttl(1) + payloadLength(2) = 29 bytes

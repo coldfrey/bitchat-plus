@@ -1,13 +1,13 @@
-#include "serial_debug.h"
-#include "ble_gateway.h"
-#include "lora_bridge.h"
-#include "message_router.h"
-#include "config_manager.h"
-#include "connection_manager.h"
-#include "message_priority_manager.h"
-#include "power_manager.h"
-#include "status_reporter.h"
-#include "loop_prevention_test.h"
+#include "utils/serial_debug.h"
+#include "communication/ble_gateway.h"
+#include "communication/lora_bridge.h"
+#include "communication/message_router.h"
+#include "utils/config_manager.h"
+#include "core/connection_manager.h"
+#include "core/message_priority_manager.h"
+#include "hardware/power_manager.h"
+#include "utils/status_reporter.h"
+#include "utils/loop_prevention_test.h"
 #include <Arduino.h>
 #include <WiFi.h>
 

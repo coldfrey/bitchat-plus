@@ -1,8 +1,8 @@
-#include "status_reporter.h"
-#include "ble_gateway.h"
-#include "lora_bridge.h"
-#include "message_router.h"
-#include "config_manager.h"
+#include "utils/status_reporter.h"
+#include "communication/ble_gateway.h"
+#include "communication/lora_bridge.h"
+#include "communication/message_router.h"
+#include "utils/config_manager.h"
 #include <Arduino.h>
 
 // Static member definitions
