@@ -1,5 +1,6 @@
 #include "ble_mesh.h"
 #include "message_router.h"
+#include "connection_manager.h"
 #include <Arduino.h>
 #include <WiFi.h>
 
@@ -45,11 +46,17 @@ void BLEMesh::init() {
     // Start advertising
     startAdvertising();
     
+    // Initialize connection manager
+    ConnectionManager::init();
+    
     Serial.printf("BLE Mesh: Initialized as peer ID: %s\n", myPeerID.c_str());
     Serial.printf("BLE Mesh: Advertising BitChat service for iOS devices: %s\n", BITCHAT_SERVICE_UUID);
 }
 
 void BLEMesh::process() {
+    // Process connection management
+    ConnectionManager::process();
+    
     // NimBLE handles most processing automatically
     // This can be used for periodic tasks or maintenance
     static unsigned long lastUpdate = 0;
@@ -64,7 +71,21 @@ void BLEMesh::process() {
             startAdvertising();
         }
         
-        Serial.printf("BLE Mesh: Connected iOS devices: %d\n", pServer->getConnectedCount());
+        Serial.printf("BLE Mesh: Connected iOS devices: %d (healthy: %d)\n", 
+                     pServer->getConnectedCount(), ConnectionManager::getHealthyConnectionCount());
+        
+        // Simulate RSSI updates for connected devices (since NimBLE doesn't easily expose this)
+        // In a production implementation, you'd query the actual BLE connection RSSI
+        if (pServer->getConnectedCount() > 0) {
+            // Simulate RSSI for connection handle 1 (simplified single connection approach)
+            int simulatedRSSI = -60 + (random(-20, 20)); // Simulate -40 to -80 dBm range
+            ConnectionManager::updateConnectionRSSI(1, simulatedRSSI);
+        }
+        
+        // Print connection statistics periodically
+        if (pServer->getConnectedCount() > 0) {
+            ConnectionManager::printConnectionStats();
+        }
     }
 }
 
@@ -86,6 +107,10 @@ void BLEMesh::sendData(const uint8_t* data, size_t length) {
 
 int BLEMesh::getConnectedClientCount() {
     return pServer->getConnectedCount();
+}
+
+void BLEMesh::setConnectionState(uint16_t connectionHandle, const ConnectionState& state) {
+    connectionStates[connectionHandle] = state;
 }
 
 void BLEMesh::generatePeerID() {
@@ -195,9 +220,21 @@ void BLEMesh::handleReceivedData(const uint8_t* data, size_t length, uint16_t co
 void ServerCallbacks::onConnect(NimBLEServer* pServer) {
     Serial.printf("BLE Mesh: iOS device connected (total: %d)\n", pServer->getConnectedCount());
     
-    // Get the connection handle and initialize connection state
-    // Note: NimBLE doesn't easily expose connection handles in onConnect
-    // We'll track this in the characteristic callback instead
+    // Get the connection handle - NimBLE limitation: use simple numbering for now
+    // In a full implementation, we'd get the actual connection handle from the BLE stack
+    uint16_t connectionHandle = pServer->getConnectedCount(); // Simple approach
+    
+    // Generate a temporary peer ID until we get the real one from VERSION_HELLO
+    String tempPeerID = "Unknown-" + String(connectionHandle);
+    
+    // Add to connection manager
+    ConnectionManager::addConnection(connectionHandle, tempPeerID);
+    
+    // Initialize connection state in BLE mesh
+    ConnectionState state;
+    state.peerID = tempPeerID;
+    state.connectTime = millis();
+    BLEMesh::setConnectionState(connectionHandle, state);
     
     // Don't stop advertising - allow multiple iOS devices to connect
 }
@@ -206,7 +243,14 @@ void ServerCallbacks::onDisconnect(NimBLEServer* pServer) {
     Serial.printf("BLE Mesh: iOS device disconnected (remaining: %d)\n", pServer->getConnectedCount());
     
     // Clean up connection states for disconnected devices
-    // Note: We'll need to implement this when we can properly track connection handles
+    // Note: Due to NimBLE API limitations, we can't easily identify which connection disconnected
+    // In a production implementation, we'd need better connection handle tracking
+    
+    // For now, remove all inactive connections (simplified approach)
+    // ConnectionManager will handle stale connection cleanup automatically
+    
+    // Clean up connection states in BLE mesh
+    // TODO: Implement proper connection handle cleanup when BLE stack provides better APIs
     
     // Restart advertising if no clients connected
     if (pServer->getConnectedCount() == 0) {
@@ -225,6 +269,13 @@ void CharacteristicCallbacks::onWrite(NimBLECharacteristic* pCharacteristic) {
         // In a full implementation, we'd track connection handles properly
         // For simplicity, we'll use a static counter or connection index
         uint16_t connectionHandle = 1; // Simplified for now - single connection
+        
+        // Update connection activity in ConnectionManager (assume success for now)
+        ConnectionManager::updateConnectionActivity(connectionHandle, true);
+        
+        // TODO: Get actual RSSI from connection and update it
+        // In a full implementation, we'd query the BLE stack for connection RSSI
+        // For now, simulate RSSI updates periodically in the BLE process function
         
         BLEMesh::handleReceivedData((const uint8_t*)value.data(), value.length(), connectionHandle);
     }

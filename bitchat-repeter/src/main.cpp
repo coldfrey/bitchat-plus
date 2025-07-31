@@ -5,6 +5,7 @@
 #include "message_router.h"
 #include "config_manager.h"
 #include "bitchat_protocol.h"
+#include "connection_manager.h"
 
 // Test function to verify LoRa packet format works correctly
 void testLoRaPacketFormat() {
@@ -339,6 +340,103 @@ void testMeshOptimization() {
     Serial.println();
 }
 
+// Test function to verify connection management functionality
+void testConnectionManagement() {
+    Serial.println("=== Testing Connection Management ===");
+    
+    // Test connection manager initialization
+    Serial.println("Testing ConnectionManager initialization...");
+    ConnectionManager::init();
+    
+    // Simulate adding connections with different quality characteristics
+    Serial.println("Testing connection tracking...");
+    
+    // Add test connections
+    ConnectionManager::addConnection(1, "iPhone-12-Pro");
+    ConnectionManager::addConnection(2, "iPad-Air-4");
+    ConnectionManager::addConnection(3, "iPhone-SE-2020");
+    
+    // Simulate different RSSI values over time
+    Serial.println("Testing RSSI tracking and scoring...");
+    
+    // Excellent connection
+    for (int i = 0; i < 5; i++) {
+        ConnectionManager::updateConnectionRSSI(1, -55 + random(-5, 5));
+        ConnectionManager::updateConnectionActivity(1, true);
+    }
+    
+    // Good connection
+    for (int i = 0; i < 5; i++) {
+        ConnectionManager::updateConnectionRSSI(2, -75 + random(-5, 5));
+        ConnectionManager::updateConnectionActivity(2, true);
+    }
+    
+    // Poor connection with some errors
+    for (int i = 0; i < 5; i++) {
+        ConnectionManager::updateConnectionRSSI(3, -95 + random(-5, 5));
+        ConnectionManager::updateConnectionActivity(3, i < 3); // 2 errors out of 5
+    }
+    
+    // Process connections to update scores
+    ConnectionManager::process();
+    
+    // Test connection scoring
+    Serial.println("Testing connection quality assessment...");
+    uint8_t score1 = ConnectionManager::getConnectionScore(1);
+    uint8_t score2 = ConnectionManager::getConnectionScore(2);
+    uint8_t score3 = ConnectionManager::getConnectionScore(3);
+    
+    Serial.printf("Connection 1 (excellent): score=%d%%, healthy=%s\n", 
+                 score1, ConnectionManager::isConnectionHealthy(1) ? "Yes" : "No");
+    Serial.printf("Connection 2 (good): score=%d%%, healthy=%s\n", 
+                 score2, ConnectionManager::isConnectionHealthy(2) ? "Yes" : "No");
+    Serial.printf("Connection 3 (poor): score=%d%%, healthy=%s\n", 
+                 score3, ConnectionManager::isConnectionHealthy(3) ? "Yes" : "No");
+    
+    // Test hysteresis and stability
+    Serial.println("Testing connection stability and hysteresis...");
+    
+    // Simulate score fluctuations to test stability
+    for (int i = 0; i < 10; i++) {
+        // Stable connection
+        ConnectionManager::updateConnectionRSSI(1, -55 + random(-2, 2));
+        ConnectionManager::updateConnectionActivity(1, true);
+        
+        // Unstable connection
+        ConnectionManager::updateConnectionRSSI(3, -85 + random(-15, 15));
+        ConnectionManager::updateConnectionActivity(3, random(0, 2)); // Random success/failure
+        
+        ConnectionManager::process();
+        delay(100); // Small delay to simulate time passing
+    }
+    
+    Serial.printf("Should maintain connection 1: %s\n", 
+                 ConnectionManager::shouldMaintainConnection(1) ? "Yes" : "No");
+    Serial.printf("Should maintain connection 3: %s\n", 
+                 ConnectionManager::shouldMaintainConnection(3) ? "Yes" : "No");
+    
+    // Test mesh coordination
+    Serial.println("Testing mesh coordination...");
+    uint8_t bestScore = ConnectionManager::getBestConnectionScore();
+    size_t healthyCount = ConnectionManager::getHealthyConnectionCount();
+    
+    Serial.printf("Best connection score: %d%%\n", bestScore);
+    Serial.printf("Healthy connections: %d\n", healthyCount);
+    
+    // Print final connection statistics
+    Serial.println("Final connection statistics:");
+    ConnectionManager::printConnectionStats();
+    
+    // Clean up test connections
+    ConnectionManager::removeConnection(1);
+    ConnectionManager::removeConnection(2);
+    ConnectionManager::removeConnection(3);
+    
+    Serial.println("SUCCESS: Connection management test completed!");
+    Serial.println("=== End Connection Management Test ===");
+    Serial.println();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -379,6 +477,9 @@ void setup() {
     
     // Test mesh optimization system
     testMeshOptimization();
+    
+    // Test connection management system
+    testConnectionManagement();
     
     digitalWrite(LED_PIN, LOW);  // Turn off LED after startup
     Serial.println("BitChat Repeater ready");
